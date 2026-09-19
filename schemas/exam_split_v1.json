@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExamSplitAIProtocolV1",
+  "type": "object",
+  "required": ["schema_version", "questions"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "document": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "subject": { "type": "string" },
+        "year": { "type": ["integer", "null"] },
+        "page_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_index"],
+        "properties": {
+          "page_index": { "type": "integer", "minimum": 0 },
+          "has_questions": { "type": "boolean" },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["question_id", "display_number", "segments", "confidence"],
+        "properties": {
+          "question_id": { "type": "string" },
+          "display_number": { "type": "string" },
+          "question_type": {
+            "type": ["string", "null"],
+            "enum": ["choice", "fill_in", "solve", "proof", "other", "小题", "大题", "选择题", "填空题", "解答题", "证明题", null]
+          },
+          "segments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["page_index", "normalized_bbox"],
+              "properties": {
+                "page_index": { "type": "integer", "minimum": 0 },
+                "normalized_bbox": {
+                  "type": "array",
+                  "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                  "minItems": 4,
+                  "maxItems": 4
+                }
+              }
+            }
+          },
+          "start_anchor": {
+            "type": ["object", "null"],
+            "properties": {
+              "page_index": { "type": "integer", "minimum": 0 },
+              "normalized_point": {
+                "type": "array",
+                "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "end_anchor": {
+            "type": ["object", "null"],
+            "properties": {
+              "page_index": { "type": "integer", "minimum": 0 },
+              "normalized_point": {
+                "type": "array",
+                "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "continuation": { "type": "boolean", "default": false },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "review_required": { "type": "boolean", "default": false },
+          "reason_codes": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
