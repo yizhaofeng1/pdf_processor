@@ -205,7 +205,9 @@ class SettingsDialog(QDialog):
         form.addRow("HTTP 代理 (可选):", proxy_layout)
 
         # Default Provider Checkbox
-        self.chk_default = QCheckBox("设为当前激活的默认服务商")
+        self.chk_default = QCheckBox("同时设为当前激活生效的服务商 (推荐)")
+        self.chk_default.setChecked(True)
+        self.chk_default.setStyleSheet("font-weight: 600; color: #38BDF8;")
         form.addRow("", self.chk_default)
 
         main_layout.addWidget(group)
@@ -288,6 +290,8 @@ class SettingsDialog(QDialog):
         self.combo_model.clear()
         self.combo_model.addItem(preset["default_model"])
         self.combo_model.setEditText(saved_model)
+        if self.combo_model.lineEdit():
+            self.combo_model.lineEdit().setPlaceholderText(f"下拉选择或输入模型，例如 {preset['default_model']}")
 
         if cfg:
             self.edit_base_url.setText(cfg.get("base_url") or preset["default_base_url"])
@@ -300,7 +304,8 @@ class SettingsDialog(QDialog):
             self.spin_timeout.setValue(60)
             self.edit_proxy.setText(all_configs.get("proxy", ""))
 
-        self.chk_default.setChecked(pid == default_pid)
+        # Always check this by default when user edits a provider
+        self.chk_default.setChecked(True)
         self.lbl_test_result.setText("点击 [测试当前 API 连接] 验证连通性，或点击 [获取模型列表] 查看可选模型。")
         self.lbl_test_result.setStyleSheet("color: #555555; font-size: 12px;")
 
@@ -471,11 +476,16 @@ class SettingsDialog(QDialog):
             is_default=is_default,
         )
 
+        if is_default:
+            KeyStorage.set_default_provider_id(pid)
+
+        status_text = "【已设为当前激活生效模型】" if is_default else "【配置已保存，未激活】"
         QMessageBox.information(
             self,
             "保存成功",
             f"已成功加密保存 {self.combo_provider.currentText()} 配置！\n"
-            f"选择模型: {model_name}\n"
+            f"当前状态: {status_text}\n"
+            f"生效模型: {model_name}\n"
             f"Key 预览: {mask_api_key(api_key)}",
         )
         self.settings_saved.emit(pid)

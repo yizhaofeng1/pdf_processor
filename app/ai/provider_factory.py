@@ -24,7 +24,7 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "default_base_url": "https://api.deepseek.com",
         "default_model": "deepseek-chat",
         "provider_class": OpenAICompatProvider,
-        "description": "DeepSeek 官方 OpenAI 兼容接口",
+        "description": "DeepSeek 官方兼容接口 (注: 官方 api.deepseek.com 为纯文本；视觉拆题请用兼容视觉代理或选用 Gemini/OpenAI/GLM/Claude)",
     },
     "openai": {
         "display_name": "OpenAI (GPT-4o)",

@@ -36,8 +36,8 @@ def test_key_storage_crud(tmp_path, monkeypatch):
     )
 
     # File must be encrypted binary ciphertext, not containing plain-text key
-    assert CREDENTIALS_FILE.exists()
-    raw_content = CREDENTIALS_FILE.read_text(errors="ignore")
+    assert test_cred_file.exists()
+    raw_content = test_cred_file.read_text(errors="ignore")
     assert test_key not in raw_content
 
     # Load decrypted
@@ -55,3 +55,39 @@ def test_key_storage_crud(tmp_path, monkeypatch):
     # Delete
     KeyStorage.delete_provider_config("test_provider")
     assert KeyStorage.get_provider_config("test_provider") is None
+
+
+def test_provider_switching_and_default_persistence(tmp_path, monkeypatch):
+    """Verify switching between providers preserves default and does not revert to gemini."""
+    test_cred_file = tmp_path / "credentials.enc"
+    monkeypatch.setattr("app.storage.key_storage.CREDENTIALS_FILE", test_cred_file)
+
+    # Initial state with no configured providers defaults to gemini
+    assert KeyStorage.get_default_provider_id() == "gemini"
+
+    # Save DeepSeek configuration
+    KeyStorage.save_provider_config(
+        provider_id="deepseek",
+        base_url="https://api.deepseek.com",
+        api_key="sk-deepseek-test",
+        model_name="deepseek-chat",
+    )
+    # Must immediately be deepseek
+    assert KeyStorage.get_default_provider_id() == "deepseek"
+
+    # Save OpenAI configuration
+    KeyStorage.save_provider_config(
+        provider_id="openai",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-openai-test",
+        model_name="gpt-4o",
+    )
+    # Must now be openai
+    assert KeyStorage.get_default_provider_id() == "openai"
+
+    # Explicitly switch back to deepseek
+    KeyStorage.set_default_provider_id("deepseek")
+    assert KeyStorage.get_default_provider_id() == "deepseek"
+
+    # Re-reading raw store should persist deepseek
+    assert KeyStorage.get_default_provider_id() == "deepseek"

@@ -40,6 +40,8 @@ data/*.db
 data/*.sqlite
 data/*.json
 data/*.pdf
+data/*.log
+data/experiments/
 data/cache/*
 data/thumbnails/*
 data/projects/*

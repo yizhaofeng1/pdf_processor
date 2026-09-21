@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QIcon,
     QFont,
     QDragEnterEvent,
@@ -215,9 +216,13 @@ class MainWindow(QMainWindow):
 
         # Settings Menu
         settings_menu = menubar.addMenu("设置(&C)")
-        pref_action = QAction("API与偏好设置...", self)
+        pref_action = QAction("⚙️ API 与服务商偏好设置...", self)
         pref_action.triggered.connect(self._on_open_settings)
         settings_menu.addAction(pref_action)
+
+        settings_menu.addSeparator()
+        self.provider_switch_menu = settings_menu.addMenu("🎯 快速切换当前生效服务商")
+        self._setup_provider_quick_switch_menu()
 
         # Help Menu
         help_menu = menubar.addMenu("帮助(&H)")
@@ -309,6 +314,7 @@ class MainWindow(QMainWindow):
         more_menu.addAction("🚀 导出选中题目 (A4无损)...", self._on_export_clicked)
         more_menu.addSeparator()
         more_menu.addAction("⚙️ API 与服务商偏好设置...", self._on_open_settings)
+        more_menu.addAction("🧪 本地识别实验 (VAQL)...", self._on_open_local_experiment)
         self.btn_more_menu.setMenu(more_menu)
         toolbar.addWidget(self.btn_more_menu)
 
@@ -567,8 +573,47 @@ class MainWindow(QMainWindow):
         status_bar.addWidget(self.status_counts_label)
 
         self.status_model_label = QLabel()
+        self.status_model_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.status_model_label.setToolTip("点击打开 AI 模型与网关配置")
+        self.status_model_label.mousePressEvent = lambda ev: self._on_open_settings()
         self._update_model_indicator()
         status_bar.addPermanentWidget(self.status_model_label)
+
+    def _setup_provider_quick_switch_menu(self) -> None:
+        """Create checkable actions for each provider preset in menubar."""
+        self.provider_action_group = QActionGroup(self)
+        self.provider_action_group.setExclusive(True)
+        self.provider_actions: Dict[str, QAction] = {}
+
+        for pid, preset in PROVIDER_PRESETS.items():
+            action = QAction(preset["display_name"], self)
+            action.setCheckable(True)
+            action.setData(pid)
+            action.triggered.connect(lambda checked=False, p=pid: self._on_quick_switch_provider(p))
+            self.provider_action_group.addAction(action)
+            self.provider_switch_menu.addAction(action)
+            self.provider_actions[pid] = action
+
+        self._sync_provider_menu()
+
+    def _sync_provider_menu(self) -> None:
+        """Synchronize checkmarks in the provider quick-switch menu with KeyStorage."""
+        active_pid = KeyStorage.get_default_provider_id()
+        if hasattr(self, "provider_actions"):
+            for pid, act in self.provider_actions.items():
+                act.setChecked(pid == active_pid)
+
+    def _on_quick_switch_provider(self, provider_id: str) -> None:
+        """Quickly switch the active default provider without opening the settings dialog."""
+        KeyStorage.set_default_provider_id(provider_id)
+        self._update_model_indicator()
+        self._sync_provider_menu()
+        preset = PROVIDER_PRESETS.get(provider_id, {})
+        disp_name = preset.get("display_name", provider_id)
+        cfg = KeyStorage.get_provider_config(provider_id) or {}
+        has_key = bool(cfg.get("api_key"))
+        key_tip = "（已配置 Key）" if has_key else "（⚠️ 尚未配置 Key，请在设置中输入）"
+        self.statusBar().showMessage(f"当前生效 AI 服务商已切换为: {disp_name} {key_tip}", 4000)
 
     def _update_model_indicator(self) -> None:
         try:
@@ -583,6 +628,7 @@ class MainWindow(QMainWindow):
             self.status_model_label.setText(f"AI网关: {dot} {display_name} ({model}) [{key_status}]")
         except Exception:
             self.status_model_label.setText("AI网关: 待配置")
+        self._sync_provider_menu()
 
     def show_home(self) -> None:
         self.stack.setCurrentIndex(0)
@@ -750,20 +796,17 @@ class MainWindow(QMainWindow):
         provider = None
         if has_key:
             try:
-                provider = ProviderFactory.create_provider(
-                    provider_id=pid,
-                    base_url=cfg.get("base_url", ""),
-                    api_key=cfg.get("api_key", ""),
-                    model_name=cfg.get("model_name", ""),
-                )
+                provider = ProviderFactory.get_active_provider()
             except Exception as e:
-                QMessageBox.warning(self, "Provider 构建失败", f"初始化 {pid} 失败: {e}")
+                QMessageBox.warning(self, "AI 服务商构建失败", f"初始化 {pid} 失败: {e}")
                 return
         else:
+            preset = PROVIDER_PRESETS.get(pid, {})
+            disp_name = preset.get("display_name", pid)
             reply = QMessageBox.question(
                 self,
                 "API Key 未配置",
-                f"当前服务商 ({pid}) 尚未设置 API Key。\n\n"
+                f"当前激活的 AI 服务商【{disp_name}】尚未设置 API Key。\n\n"
                 "• 点击【是】：前往设置窗口配置 API Key\n"
                 "• 点击【否】：使用本地规则与文本启发式分析",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
@@ -1278,12 +1321,7 @@ class MainWindow(QMainWindow):
         provider = None
         if has_key:
             try:
-                provider = ProviderFactory.create_provider(
-                    provider_id=pid,
-                    base_url=cfg.get("base_url", ""),
-                    api_key=cfg.get("api_key", ""),
-                    model_name=cfg.get("model_name", ""),
-                )
+                provider = ProviderFactory.get_active_provider()
             except Exception as e:
                 logger.warning(f"Batch analysis provider creation error: {e}")
 
@@ -1360,8 +1398,34 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_settings_saved(self, provider_id: str) -> None:
+        KeyStorage.set_default_provider_id(provider_id)
         self._update_model_indicator()
-        self.statusBar().showMessage(f"已切换并加载 AI 模型服务商: {provider_id}", 3000)
+        self._sync_provider_menu()
+        preset = PROVIDER_PRESETS.get(provider_id, {})
+        disp_name = preset.get("display_name", provider_id)
+        self.statusBar().showMessage(f"已切换并激活 AI 服务商: {disp_name}", 4000)
+
+    def _on_open_local_experiment(self) -> None:
+        """Open the experimental local recognition and virtual address localization dialog."""
+        from ..experimental.local_recognition.ui import LocalRecognitionExperimentDialog
+        dlg = LocalRecognitionExperimentDialog(
+            pdf_reader=self.pdf_reader,
+            formal_questions=self.questions,
+            parent=self,
+        )
+        dlg.apply_results_requested.connect(self._on_apply_experiment_questions)
+        dlg.exec()
+
+    def _on_apply_experiment_questions(self, questions: List[Question]) -> None:
+        """Handle applying experimental questions to the workbench after user confirmation."""
+        self.questions = questions
+        self._populate_question_list()
+        QMessageBox.information(
+            self,
+            "已应用实验结果",
+            f"已成功将实验识别的 {len(questions)} 道题目载入当前工作台！\n"
+            "您可以在左侧列表与中间画布中查看和手动微调题目边界。",
+        )
 
     def _on_export_clicked(self) -> None:
         """Launch the Export Dialog to generate lossless A4 PDF."""

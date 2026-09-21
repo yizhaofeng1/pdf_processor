@@ -138,7 +138,7 @@ class KeyStorage:
         model_name: str,
         timeout: float = 60.0,
         proxy: str = "",
-        is_default: bool = False,
+        is_default: bool = True,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Encrypt and save configuration for a given provider."""
@@ -153,13 +153,14 @@ class KeyStorage:
             "proxy": proxy.strip(),
             "extra": extra or {},
         }
-        if is_default or not store.get("default_provider"):
+        # If explicitly requested, or if provider has an API key configured, make it the active default
+        if is_default or not store.get("default_provider") or bool(api_key.strip()):
             store["default_provider"] = provider_id
         if proxy:
             store["proxy"] = proxy.strip()
 
         cls._write_raw_store(store)
-        logger.info(f"Encrypted and stored configuration for provider: {provider_id}")
+        logger.info(f"Encrypted and stored configuration for provider: {provider_id} (active: {store.get('default_provider') == provider_id})")
 
     @classmethod
     def get_provider_config(cls, provider_id: str) -> Optional[Dict[str, Any]]:
@@ -186,11 +187,25 @@ class KeyStorage:
 
     @classmethod
     def get_default_provider_id(cls) -> str:
+        """Get currently active provider ID, prioritizing configured providers."""
         store = cls._read_raw_store()
-        return store.get("default_provider") or "gemini"
+        default_pid = store.get("default_provider")
+        providers = store.get("providers", {})
+
+        # If current default provider has an API key or is configured, honor it
+        if default_pid and default_pid in providers and providers[default_pid].get("api_key"):
+            return default_pid
+
+        # If current default has NO key, but another provider DOES have a key, auto-select the configured one
+        for pid, cfg in providers.items():
+            if cfg.get("api_key"):
+                return pid
+
+        return default_pid or "gemini"
 
     @classmethod
     def set_default_provider_id(cls, provider_id: str) -> None:
         store = cls._read_raw_store()
         store["default_provider"] = provider_id
         cls._write_raw_store(store)
+        logger.info(f"Updated default active provider to: {provider_id}")
