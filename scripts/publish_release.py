@@ -122,13 +122,16 @@ def main():
             print(f"Created release {target_tag}, ID:", release["id"])
 
     upload_base = release["upload_url"].split("{")[0]
-    existing_assets = {a["name"]: a["id"] for a in release.get("assets", [])}
+    existing_assets = {a["name"]: a for a in release.get("assets", [])}
 
     dist_dir = Path("dist")
     assets = [
         ("ExamSplitAI_Windows_x64.zip", "application/zip"),
         ("ExamSplitAI_Linux_x64.tar.gz", "application/gzip"),
     ]
+
+    import time
+    import requests
 
     for filename, content_type in assets:
         filepath = dist_dir / filename
@@ -137,15 +140,19 @@ def main():
             continue
 
         if filename in existing_assets:
-            print(f"Deleting existing asset {filename} (ID: {existing_assets[filename]})...")
-            del_req = urllib.request.Request(
-                f"https://api.github.com/repos/{repo}/releases/assets/{existing_assets[filename]}",
-                headers=headers,
-                method="DELETE",
-            )
-            urllib.request.urlopen(del_req)
+            item = existing_assets[filename]
+            if item.get("state") == "uploaded":
+                print(f"✓ Asset {filename} is already uploaded and valid (ID: {item['id']}). Skipping.")
+                continue
+            else:
+                print(f"Deleting incomplete asset {filename} (ID: {item['id']})...")
+                del_req = urllib.request.Request(
+                    f"https://api.github.com/repos/{repo}/releases/assets/{item['id']}",
+                    headers=headers,
+                    method="DELETE",
+                )
+                urllib.request.urlopen(del_req)
 
-        print(f"Uploading {filename} ({filepath.stat().st_size / 1024 / 1024:.1f} MB)...")
         upload_url = f"{upload_base}?name={urllib.parse.quote(filename)}"
         upload_headers = {
             "Authorization": f"token {token}",
@@ -178,26 +185,35 @@ def main():
             def close(self):
                 self.f.close()
 
-        import requests
-        reader = ProgressFileReader(filepath)
-        try:
-            resp = requests.post(
-                upload_url,
-                data=reader,
-                headers=upload_headers,
-                timeout=(30, 600),
-            )
-        finally:
-            reader.close()
+        success = False
+        for attempt in range(1, 6):
+            print(f"Uploading {filename} (attempt {attempt}/5, {filepath.stat().st_size / 1024 / 1024:.1f} MB)...")
+            reader = ProgressFileReader(filepath)
+            try:
+                resp = requests.post(
+                    upload_url,
+                    data=reader,
+                    headers=upload_headers,
+                    timeout=(60, 600),
+                )
+                if resp.status_code in (200, 201):
+                    res = resp.json()
+                    print(f"Uploaded {filename} successfully! Asset ID: {res.get('id', 'unknown')}")
+                    success = True
+                    break
+                else:
+                    print(f"Attempt {attempt} failed: HTTP {resp.status_code}: {resp.text[:300]}")
+            except Exception as e:
+                print(f"Attempt {attempt} connection error: {e}")
+            finally:
+                reader.close()
+            time.sleep(3)
 
-        if resp.status_code not in (200, 201):
-            print(f"Failed to upload {filename}: HTTP {resp.status_code}: {resp.text[:300]}")
+        if not success:
+            print(f"Failed to upload {filename} after 5 attempts!")
             sys.exit(1)
 
-        res = resp.json()
-        print(f"Uploaded {filename} successfully! Asset ID: {res.get('id', 'unknown')}")
-
-    print("All assets uploaded successfully!")
+    print("All assets processed successfully!")
 
 
 if __name__ == "__main__":
