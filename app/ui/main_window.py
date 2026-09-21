@@ -1445,11 +1445,12 @@ class MainWindow(QMainWindow):
             self,
             "关于 ExamSplit AI",
             "ExamSplit AI —— 试卷 PDF 智能拆题与选题导出系统\n"
-            "版本: v0.2.0 (全功能版)\n\n"
+            "版本: v1.1.0 (正式版)\n\n"
             "• 原生 PDF 矢量与高清图无损裁剪\n"
             "• 多模态 AI 视觉结构定位与题号跨页解析\n"
             "• 交互式边缘手柄高精微调\n"
-            "• A4 单题一页与紧凑排版双模式无损输出",
+            "• A4 单题一页与紧凑排版双模式无损输出\n"
+            "• 多厂商 AI 网关与一键即时切换",
         )
 
     # Window-wide Drag & Drop
