@@ -17,10 +17,25 @@ class PromptManager:
         return path.read_text(encoding="utf-8").strip()
 
     @classmethod
-    def get_system_prompt(cls, task_type: str = "detect_markers") -> str:
-        """Return standardized system prompt enforcing ExamSplit JSON Protocol."""
+    def get_system_prompt(
+        cls,
+        task_type: str = "detect_markers",
+        context_hints: Optional[dict[str, str]] = None,
+    ) -> str:
+        """Return standardized system prompt enforcing ExamSplit JSON Protocol with optional structure hints."""
         base_prompt = cls.load_prompt(task_type)
+
+        structure_hint = (context_hints or {}).get("paper_structure", "").strip()
+        structure_block = ""
+        if structure_hint:
+            structure_block = (
+                f"\n\n【用户指定的本卷结构大纲分布（重要裁决依据）】：\n"
+                f"{structure_hint}\n"
+                f"请务必结合上述试卷题型分布大纲，准确判定各题目的题号范围、小题/大题属性与边界范围！\n"
+            )
+
         protocol_suffix = """
+
 【重要输出规范】：
 1. 绝对不要对题目进行重新抄写、文本重写或给出答案解析。
 2. 所有识别区域的坐标必须使用归一化坐标 [x1, y1, x2, y2]，取值在 0.0 ~ 1.0 之间。
@@ -52,4 +67,4 @@ class PromptManager:
   "warnings": []
 }
 """
-        return f"{base_prompt}\n{protocol_suffix}"
+        return f"{base_prompt}{structure_block}\n{protocol_suffix}"

@@ -19,7 +19,7 @@ def test_settings_dialog_initialization(qtbot):
     dialog.combo_provider.setCurrentIndex(idx)
 
     assert "api.deepseek.com" in dialog.edit_base_url.text()
-    assert dialog.combo_model.currentText() == "deepseek-chat"
+    assert "deepseek" in dialog.combo_model.currentText()
 
 
 def test_settings_dialog_toggle_password(qtbot):

@@ -46,6 +46,7 @@ class DetectionService:
         project_id: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        context_hints: Optional[Dict[str, str]] = None,
     ) -> List[Question]:
         """Execute full end-to-end question detection pipeline."""
         page_count = reader.page_count
@@ -71,7 +72,7 @@ class DetectionService:
             page_info = reader.get_page_info(p_idx)
             notify(p_idx + 1, f"正在分析第 {p_idx + 1} / {page_count} 页结构与题目...")
 
-            markers = hybrid_detector.detect_page(p_idx)
+            markers = hybrid_detector.detect_page(p_idx, context_hints=context_hints)
 
             # Extract native text blocks if available for high-precision boundary snapping
             text_blocks = None
@@ -163,12 +164,14 @@ class AnalysisWorker(QThread):
         reader: PDFReader,
         provider=None,
         project_id: Optional[str] = None,
+        context_hints: Optional[Dict[str, str]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.reader = reader
         self.provider = provider
         self.project_id = project_id
+        self.context_hints = context_hints
         self._is_cancelled = False
 
     def cancel(self) -> None:
@@ -182,6 +185,7 @@ class AnalysisWorker(QThread):
                 project_id=self.project_id,
                 progress_callback=lambda cur, tot, msg: self.progress.emit(cur, tot, msg),
                 cancel_check=lambda: self._is_cancelled,
+                context_hints=self.context_hints,
             )
             self.finished.emit(questions)
         except Exception as e:
@@ -203,12 +207,14 @@ class BatchAnalysisWorker(QThread):
         pdf_paths: List[Path],
         provider=None,
         skip_cached: bool = True,
+        context_hints: Optional[Dict[str, str]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.pdf_paths = [Path(p) for p in pdf_paths]
         self.provider = provider
         self.skip_cached = skip_cached
+        self.context_hints = context_hints
         self._is_cancelled = False
 
     def cancel(self) -> None:
@@ -249,6 +255,7 @@ class BatchAnalysisWorker(QThread):
                     project_id=pid,
                     progress_callback=_progress_cb,
                     cancel_check=lambda: self._is_cancelled,
+                    context_hints=self.context_hints,
                 )
                 reader.close()
 

@@ -243,6 +243,46 @@ class BoundaryResolver:
 
         return (x_left, y1, x_right, y2)
 
+    def _is_dense_large_question(
+        self,
+        q: Question,
+        sorted_qs: List[Question],
+        curr_idx: int,
+        next_limit_y: float,
+    ) -> bool:
+        """Check if AI returned an already dense large question interval on this page.
+
+        If the AI's returned interval is compact (e.g., height <= 0.35), or if multiple
+        large questions share the page with compact intervals (average distance <= 0.38),
+        or the gap between the AI box end and the next question start is small (<= 0.08),
+        this indicates the source test paper is dense with calculation/proof questions.
+        In this case, trust the AI visual boundary and prohibit local downward expansions.
+        """
+        if not q.segments:
+            return False
+        seg = q.segments[0]
+        qy1, qy2 = seg.normalized_bbox[1], seg.normalized_bbox[3]
+        ai_height = qy2 - qy1
+
+        # 1. Very compact height directly returned by AI (e.g. <= 0.22, short solve question)
+        if ai_height <= 0.22:
+            return True
+
+        # 2. In multi-question context (dense question paper):
+        if len(sorted_qs) >= 2:
+            # Compact height when multiple questions share page
+            if ai_height <= 0.30:
+                return True
+            # Gap to next question is small (compact vertical flow)
+            if next_limit_y < 0.95 and (next_limit_y - qy2) <= 0.08:
+                return True
+            # Multiple large questions on the same page/column
+            large_qs_count = sum(1 for item in sorted_qs if self._is_large_question(item))
+            if large_qs_count >= 2 and (next_limit_y - qy1) <= 0.45:
+                return True
+
+        return False
+
     def _snap_questions_to_text_blocks(
         self,
         questions: List[Question],
@@ -250,12 +290,11 @@ class BoundaryResolver:
         page_w: float,
         page_h: float,
     ) -> List[Question]:
-        """Refine bounding box bounds: trust AI for dense small questions, strictly review large solve questions.
+        """Refine bounding box bounds: trust AI for dense questions, review sparse large solve questions.
 
-        - Dense small questions (choice/fill-in): Trust AI's visual bounding box directly!
-          The AI sees the visual ink boundaries from stem to option D. Do NOT run aggressive
-          local text expansion that causes adjacent small questions to collide and overlap.
-        - Large solve questions (解答题/证明题): Apply strict local review to find the actual
+        - Small questions (choice/fill-in) & Dense Large questions: Trust AI's visual bounding box directly!
+          The AI sees the visual ink boundaries. Do NOT run aggressive local text expansion.
+        - Sparse Large questions (解答题/证明题伴随大片空白): Apply strict local review to find the actual
           end of black text and lop off any exaggerated blank answer space.
         """
         if not questions or not text_blocks:
@@ -317,31 +356,44 @@ class BoundaryResolver:
                     qy2 = min(next_limit_y - 0.002, qy1 + 0.015)
             else:
                 # ----------------------------------------------------
-                # 大题（本地只对大题做区间约束，剔除夸大空白）：
-                # 1. y1 绝不向上拉伸（防止吞入上方的"三、解答题"等大纲标题）
-                # 2. y2 本地严格审查：依据本题实际文字/公式结尾紧贴闭合
+                # 大题处理：
+                # 检测是否属于密集大题排版。如果 AI 返回的大题区间本来就比较密集，
+                # 说明源文件本身就是大题密集的，以 AI 为主，禁止本地做任何向下扩展！
                 # ----------------------------------------------------
                 if i > 0:
                     qy1 = max(qy1, prev_limit_y + 0.002)
 
-                # 只审查属于本题范围的正文文本块（起始于下一题之前）
-                q_blocks = [
-                    b for b in norm_blocks
-                    if (b[3] >= (qy1 - 0.005))
-                    and (b[1] < (next_limit_y - 0.005))
-                    and not (b[2] < qx1 - 0.05 or b[0] > qx2 + 0.05)
-                ]
-                if q_blocks:
-                    last_text_bottom = max(b[3] for b in q_blocks)
-                    max_allowed_bottom = min(next_limit_y - 0.005, last_text_bottom + 0.012)
-                    qy2 = min(max(qy2, last_text_bottom + 0.004), max_allowed_bottom)
-                else:
+                is_dense_large = self._is_dense_large_question(q, sorted_qs, i, next_limit_y)
+
+                if is_dense_large:
+                    # 密集大题：纯粹以 AI 视觉为准！严禁本地向下扩展吸附
                     if i + 1 < len(sorted_qs):
-                        qy2 = min(qy2, next_limit_y - 0.005)
+                        qy2 = min(qy2, next_limit_y - 0.002)
+                    if qy2 <= qy1 + 0.01:
+                        qy2 = min(next_limit_y - 0.002, qy1 + 0.015)
+                    logger.debug(f"Question {q.display_number}: 判定为密集大题，以 AI 视觉边界为主，禁止本地扩展。")
+                else:
+                    # 稀疏大题（可能有大片空白作答区）：
+                    # 本地只对稀疏大题做区间约束，剔除夸大空白：
+                    # y2 本地严格审查：依据本题实际文字/公式结尾紧贴闭合
+                    q_blocks = [
+                        b for b in norm_blocks
+                        if (b[3] >= (qy1 - 0.005))
+                        and (b[1] < (next_limit_y - 0.005))
+                        and not (b[2] < qx1 - 0.05 or b[0] > qx2 + 0.05)
+                    ]
+                    if q_blocks:
+                        last_text_bottom = max(b[3] for b in q_blocks)
+                        max_allowed_bottom = min(next_limit_y - 0.005, last_text_bottom + 0.012)
+                        qy2 = min(max(qy2, last_text_bottom + 0.004), max_allowed_bottom)
+                    else:
+                        if i + 1 < len(sorted_qs):
+                            qy2 = min(qy2, next_limit_y - 0.005)
 
             qy1 = clamp(qy1, 0.01, 0.98)
             qy2 = clamp(qy2, qy1 + 0.015, 0.99)
             seg.normalized_bbox = (qx1, qy1, qx2, qy2)
 
         return sorted_qs
+
 

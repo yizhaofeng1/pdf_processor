@@ -48,7 +48,10 @@ class ClaudeProvider(VisionModelProvider):
         return headers
 
     def fetch_available_models(self) -> list[str]:
-        """Fetch models from /models or return standard Anthropic models."""
+        """Fetch models from /models."""
+        if not self.api_key:
+            raise ValueError("未设置 API Key，无法获取模型列表")
+
         url = f"{self.base_url}/models"
         try:
             with self.create_http_client() as client:
@@ -58,15 +61,13 @@ class ClaudeProvider(VisionModelProvider):
                     models = [m.get("id") for m in data.get("data", []) if m.get("id")]
                     if models:
                         return sorted(models)
-        except Exception:
-            pass
-
-        return [
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
-            "claude-3-sonnet-20240229",
-        ]
+                    raise RuntimeError("Anthropic 接口未返回任何可用模型")
+                else:
+                    err_msg = resp.text[:200].strip()
+                    raise RuntimeError(f"HTTP {resp.status_code}: {err_msg}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch Claude models: {e}")
+            raise
 
     def test_connection(self) -> Tuple[bool, str]:
         """Test API reachability with a 1-token message test."""
@@ -102,7 +103,7 @@ class ClaudeProvider(VisionModelProvider):
             raise ValueError("未配置 Claude API Key")
 
         endpoint = f"{self.base_url}/messages"
-        system_prompt = PromptManager.get_system_prompt("detect_markers")
+        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
 
         content_blocks: list[dict] = []
         for img_path in request.image_paths:
@@ -116,10 +117,16 @@ class ClaudeProvider(VisionModelProvider):
                 },
             })
 
+        structure_hint = (request.context_hints or {}).get("paper_structure", "").strip()
+        user_prompt_text = "请根据给出的试卷页面图像，识别所有独立题目及其完整边界区域，严格输出标准 JSON。"
+        if structure_hint:
+            user_prompt_text += f"\n【试卷大纲结构参考分布】：\n{structure_hint}"
+
         content_blocks.append({
             "type": "text",
-            "text": "请根据给出的试卷页面图像，识别所有独立题目及其完整边界区域，严格输出标准 JSON。",
+            "text": user_prompt_text,
         })
+
 
         payload = {
             "model": self.model_name,

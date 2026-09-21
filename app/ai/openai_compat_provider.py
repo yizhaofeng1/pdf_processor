@@ -74,16 +74,13 @@ class OpenAICompatProvider(VisionModelProvider):
                     models = [m.get("id") for m in data.get("data", []) if m.get("id")]
                     if models:
                         return sorted(models)
+                    raise RuntimeError("远端接口返回的模型列表为空")
+                else:
+                    err_msg = resp.text[:200].strip()
+                    raise RuntimeError(f"HTTP {resp.status_code}: {err_msg}")
         except Exception as e:
             logger.warning(f"Failed to fetch models from {models_url}: {e}")
-
-        if "deepseek" in self.provider_id:
-            return ["deepseek-chat", "deepseek-reasoner"]
-        elif "glm" in self.provider_id:
-            return ["glm-4v", "glm-4", "glm-4-flash"]
-        elif "openai" in self.provider_id:
-            return ["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"]
-        return [self.model_name]
+            raise
 
     def test_connection(self) -> Tuple[bool, str]:
         """Test API connectivity using /models or a lightweight ping completion."""
@@ -128,11 +125,17 @@ class OpenAICompatProvider(VisionModelProvider):
             raise ValueError(f"未配置 {self.provider_id} API Key")
 
         endpoint = self._get_chat_endpoint()
-        system_prompt = PromptManager.get_system_prompt("detect_markers")
+        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
+
+        structure_hint = (request.context_hints or {}).get("paper_structure", "").strip()
+        user_prompt_text = "请根据给出的试卷页面图像，识别所有独立题目及其完整边界区域。"
+        if structure_hint:
+            user_prompt_text += f"\n【试卷大纲结构参考分布】：\n{structure_hint}"
 
         content_items: list[dict] = [
-            {"type": "text", "text": "请根据给出的试卷页面图像，识别所有独立题目及其完整边界区域。"}
+            {"type": "text", "text": user_prompt_text}
         ]
+
 
         for img_path in request.image_paths:
             b64_data = encode_image_base64(img_path)

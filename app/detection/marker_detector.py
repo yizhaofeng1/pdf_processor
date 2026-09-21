@@ -249,15 +249,16 @@ class HybridMarkerDetector:
         self.native_detector = NativeTextMarkerDetector(reader)
         self.ai_detector = ai_detector
 
-    def detect_page(self, page_index: int) -> List[QuestionMarker]:
+    def detect_page(self, page_index: int, context_hints: Optional[dict[str, str]] = None) -> List[QuestionMarker]:
         """Detect markers: prioritize AI vision if configured; fallback to native text detector."""
         # 1. Prioritize AI vision detector if configured (Vision-first architecture)
         if self.ai_detector:
             try:
-                ai_markers = self.ai_detector.detect_page(self.reader, page_index)
+                ai_markers = self.ai_detector.detect_page(self.reader, page_index, context_hints=context_hints)
                 if ai_markers and len(ai_markers) > 0:
                     logger.info(f"Page {page_index}: AI vision detector successfully identified {len(ai_markers)} markers.")
                     return ai_markers
+
                 else:
                     logger.warning(f"Page {page_index}: AI vision returned 0 markers, falling back to native text detector.")
             except Exception as e:

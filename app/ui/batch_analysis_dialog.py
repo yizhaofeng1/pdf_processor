@@ -26,6 +26,8 @@ from ..models.question import Question
 from ..services.detection_service import BatchAnalysisWorker
 from ..services.question_basket import GLOBAL_BASKET
 from ..pdf.reader import PDFReader
+from ..storage.paper_template import PaperTemplateStorage
+from .paper_template_dialog import PaperTemplateDialog
 
 logger = logging.getLogger("examsplit.ui.batch_analysis")
 
@@ -67,6 +69,25 @@ class BatchAnalysisDialog(QDialog):
         self.chk_skip_cache.setChecked(True)
         header_layout.addWidget(self.chk_skip_cache)
         layout.addLayout(header_layout)
+
+        # Template Selection Row
+        tpl_layout = QHBoxLayout()
+        tpl_layout.setSpacing(8)
+        lbl_tpl = QLabel("📋 试卷大纲结构模板:")
+        lbl_tpl.setStyleSheet("font-weight: 700; color: #E2E8F0;")
+        tpl_layout.addWidget(lbl_tpl)
+
+        self.combo_template = QComboBox()
+        self.combo_template.setFixedHeight(32)
+        tpl_layout.addWidget(self.combo_template, 1)
+
+        self.btn_config_template = QPushButton("⚙️ 配置/自定义模板...")
+        self.btn_config_template.setFixedHeight(32)
+        self.btn_config_template.clicked.connect(self._on_config_template)
+        tpl_layout.addWidget(self.btn_config_template)
+
+        layout.addLayout(tpl_layout)
+        self._refresh_templates()
 
         # Table
         self.table = QTableWidget()
@@ -223,11 +244,20 @@ class BatchAnalysisDialog(QDialog):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.chk_skip_cache.setEnabled(False)
+        self.combo_template.setEnabled(False)
+        self.btn_config_template.setEnabled(False)
+
+        tpl_key = self.combo_template.currentData()
+        structure_text = PaperTemplateStorage.get_template_content(tpl_key) if tpl_key else ""
+        context_hints = {}
+        if structure_text:
+            context_hints["paper_structure"] = structure_text
 
         self.worker = BatchAnalysisWorker(
             pdf_paths=self.pdf_paths,
             provider=self.provider,
             skip_cached=self.chk_skip_cache.isChecked(),
+            context_hints=context_hints,
             parent=self,
         )
 
@@ -349,3 +379,28 @@ class BatchAnalysisDialog(QDialog):
             "试题篮",
             f"已将 {count} 道题目添加到试题篮！\n当前试题篮共有 {GLOBAL_BASKET.count()} 道题目。",
         )
+
+    def _refresh_templates(self, selected_name: Optional[str] = None) -> None:
+        self.combo_template.blockSignals(True)
+        self.combo_template.clear()
+
+        all_templates = PaperTemplateStorage.get_all_templates()
+        target = selected_name or PaperTemplateStorage.get_active_template_name()
+
+        target_idx = 0
+        for idx, name in enumerate(all_templates.keys()):
+            prefix = "📌 " if PaperTemplateStorage.is_builtin(name) else "⭐ "
+            self.combo_template.addItem(f"{prefix}{name}", name)
+            if name == target:
+                target_idx = idx
+
+        self.combo_template.setCurrentIndex(target_idx)
+        self.combo_template.blockSignals(False)
+
+    def _on_config_template(self) -> None:
+        cur_tpl = self.combo_template.currentData()
+        dlg = PaperTemplateDialog(current_template_name=cur_tpl, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            chosen = dlg.get_template_name()
+            self._refresh_templates(selected_name=chosen)
+

@@ -58,3 +58,5 @@ data/projects/*
 *.swo
 *Zone.Identifier
 .DS_Store
+models/
+*.gguf

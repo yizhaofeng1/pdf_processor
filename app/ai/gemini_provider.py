@@ -67,7 +67,7 @@ class GeminiProvider(VisionModelProvider):
     def fetch_available_models(self) -> List[str]:
         """Query Gemini API for available models supporting content generation."""
         if not self.api_key:
-            return DEFAULT_GEMINI_MODELS
+            raise ValueError("未设置 API Key，无法获取模型列表")
 
         root = self._get_api_root()
         url = f"{root}/models?key={self.api_key}"
@@ -83,13 +83,17 @@ class GeminiProvider(VisionModelProvider):
                         methods = m.get("supportedGenerationMethods", [])
                         if "generateContent" in methods and ("gemini" in name or "gemma" in name):
                             models.append(name)
-                    # Sort to bring 2.5 and flash models to top
-                    models.sort(key=lambda x: ("2.5" in x or "flash" in x, x), reverse=True)
-                    return models if models else DEFAULT_GEMINI_MODELS
+                    # Sort to bring 2.5, 3.x, and flash models to top
+                    models.sort(key=lambda x: ("3." in x or "2.5" in x or "flash" in x, x), reverse=True)
+                    if models:
+                        return models
+                    raise RuntimeError("Gemini 接口未返回任何支持内容生成的模型")
+                else:
+                    err_msg = resp.text[:200].strip()
+                    raise RuntimeError(f"HTTP {resp.status_code}: {err_msg}")
         except Exception as e:
             logger.warning(f"Failed to fetch remote Gemini models: {e}")
-
-        return DEFAULT_GEMINI_MODELS
+            raise
 
     def test_connection(self) -> Tuple[bool, str]:
         """Test API connectivity using model list call."""
@@ -125,7 +129,7 @@ class GeminiProvider(VisionModelProvider):
         root = self._get_api_root()
         endpoint = f"{root}/models/{clean_model}:generateContent?key={self.api_key}"
 
-        system_prompt = PromptManager.get_system_prompt("detect_markers")
+        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
 
         parts: list[dict] = []
         for img_path in request.image_paths:
@@ -137,9 +141,15 @@ class GeminiProvider(VisionModelProvider):
                 }
             })
 
+        structure_hint = (request.context_hints or {}).get("paper_structure", "").strip()
+        user_prompt_text = "请识别上述试卷页面中的所有独立题目与边界坐标。"
+        if structure_hint:
+            user_prompt_text += f"\n【试卷大纲结构参考分布】：\n{structure_hint}"
+
         parts.append({
-            "text": f"{system_prompt}\n\n请识别上述试卷页面中的所有独立题目与边界坐标。"
+            "text": f"{system_prompt}\n\n{user_prompt_text}"
         })
+
 
         payload = {
             "contents": [{"parts": parts}],

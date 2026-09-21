@@ -56,6 +56,8 @@ from .home_view import HomeView
 from .export_dialog import ExportDialog
 from .question_basket_dialog import QuestionBasketDialog
 from .batch_analysis_dialog import BatchAnalysisDialog
+from .paper_template_dialog import PaperTemplateDialog
+from ..storage.paper_template import PaperTemplateStorage
 from .styles import MODERN_APP_STYLESHEET
 
 QUESTION_TYPE_NAMES = {
@@ -250,6 +252,38 @@ class MainWindow(QMainWindow):
         self.tb_analyze.setEnabled(False)
         self.tb_analyze.triggered.connect(self._on_run_analysis)
 
+        # Template selector & configuration
+        lbl_template = QLabel(" 📋 大纲模板: ")
+        lbl_template.setStyleSheet("font-weight: 700; color: #94A3B8; font-size: 13px; margin-left: 4px;")
+        toolbar.addWidget(lbl_template)
+
+        self.combo_template = QComboBox()
+        self.combo_template.setMinimumWidth(180)
+        self.combo_template.setToolTip("选择试卷大纲结构模板（如2021考研数学），将题目分布注入AI分析提示词")
+        self.combo_template.currentIndexChanged.connect(self._on_toolbar_template_changed)
+        toolbar.addWidget(self.combo_template)
+
+        self.btn_manage_template = QToolButton()
+        self.btn_manage_template.setText("⚙️ 配置模板")
+        self.btn_manage_template.setStyleSheet("""
+            QToolButton {
+                background: #1E293B;
+                color: #38BDF8;
+                border: 1px solid #334155;
+                font-weight: 600;
+                padding: 4px 8px;
+                border-radius: 6px;
+                margin-right: 4px;
+            }
+            QToolButton:hover {
+                background: #334155;
+                color: #7DD3FC;
+            }
+        """)
+        self.btn_manage_template.setToolTip("查看、编辑或自定义保存新的试卷大纲结构模板")
+        self.btn_manage_template.clicked.connect(self._on_open_template_dialog)
+        toolbar.addWidget(self.btn_manage_template)
+
         self.tb_batch = toolbar.addAction("⚡ 批量后台分析")
         self.tb_batch.triggered.connect(lambda: self._on_open_batch_analysis())
 
@@ -264,6 +298,10 @@ class MainWindow(QMainWindow):
 
         self.tb_invert = toolbar.addAction("🔄 反选")
         self.tb_invert.triggered.connect(self._on_invert_selection)
+
+        self.tb_batch_basket = toolbar.addAction("🛒 勾选入篮")
+        self.tb_batch_basket.setToolTip("将当前勾选的所有题目批量加入组卷试题篮")
+        self.tb_batch_basket.triggered.connect(self._on_batch_add_basket)
 
         toolbar.addSeparator()
 
@@ -317,6 +355,8 @@ class MainWindow(QMainWindow):
         more_menu.addAction("🧪 本地识别实验 (VAQL)...", self._on_open_local_experiment)
         self.btn_more_menu.setMenu(more_menu)
         toolbar.addWidget(self.btn_more_menu)
+
+        self._sync_template_combo()
 
     def _setup_central_ui(self) -> None:
         self.stack = QStackedWidget(self)
@@ -378,6 +418,25 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_select_all)
         btn_layout.addWidget(self.btn_invert_select)
         left_layout.addLayout(btn_layout)
+
+        self.btn_batch_basket = QPushButton("🛒 勾选试题一键入篮")
+        self.btn_batch_basket.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284C7, stop:1 #0369A1);
+                color: #FFFFFF;
+                font-weight: 700;
+                font-size: 13px;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 10px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #38BDF8, stop:1 #0284C7);
+            }
+        """)
+        self.btn_batch_basket.setToolTip("将左侧列表中所有勾选的题目一键全部添加进组卷试题篮")
+        self.btn_batch_basket.clicked.connect(self._on_batch_add_basket)
+        left_layout.addWidget(self.btn_batch_basket)
 
         # 2. Center: PDF Viewer Panel
         center_panel = QWidget()
@@ -651,9 +710,17 @@ class MainWindow(QMainWindow):
             return False
 
         try:
-            # If switching away from an active document with unsaved changes, save to SQLite
+            # 1. If switching away from an active document with unsaved changes, save to SQLite
             if self.pdf_reader and self.questions:
                 save_project_questions(self.pdf_reader.file_hash[:16], self.questions)
+
+            # 2. Strict document isolation: Immediately wipe previous document questions and overlays
+            self.questions = []
+            self.selected_question = None
+            self.question_list_widget.clear()
+            self._update_counts_indicator()
+            self._clear_detail_panel()
+            self.pdf_viewer.clear_overlays()
 
             # Reuse existing reader or create new one
             if path_str in self.opened_documents:
@@ -693,10 +760,12 @@ class MainWindow(QMainWindow):
 
                 self.questions = cached_qs
                 self._populate_question_list()
+                self._update_viewer_overlays()
                 self.statusBar().showMessage(f"已恢复已存切题记录: 共 {len(cached_qs)} 道题", 3000)
             else:
                 self.questions = []
                 self.question_list_widget.clear()
+                self._update_viewer_overlays()
                 self._update_counts_indicator()
                 self.statusBar().showMessage(f"成功打开试卷: {path.name}，可点击【开始智能分析】", 3000)
 
@@ -734,7 +803,9 @@ class MainWindow(QMainWindow):
         self.questions = []
         self.selected_question = None
         self.question_list_widget.clear()
+        self.pdf_viewer.clear_overlays()
         self.pdf_viewer.set_pdf_reader(None)
+        self._clear_detail_panel()
         self.action_run_analysis.setEnabled(False)
         self.tb_analyze.setEnabled(False)
         self.tb_add_box.setEnabled(False)
@@ -817,6 +888,13 @@ class MainWindow(QMainWindow):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        # Collect template structure hint from active template
+        current_tpl = self.combo_template.currentData() if hasattr(self, "combo_template") else None
+        structure_text = PaperTemplateStorage.get_template_content(current_tpl) if current_tpl else ""
+        context_hints = {}
+        if structure_text:
+            context_hints["paper_structure"] = structure_text
+
         total_steps = self.pdf_reader.page_count + 3
         progress_dlg = QProgressDialog("正在启动试卷切分流水线...", "取消", 0, total_steps, self)
         progress_dlg.setWindowTitle("ExamSplit AI 分析中")
@@ -828,6 +906,7 @@ class MainWindow(QMainWindow):
             reader=self.pdf_reader,
             provider=provider,
             project_id=self.pdf_reader.file_hash[:16],
+            context_hints=context_hints,
             parent=self,
         )
 
@@ -1083,6 +1162,8 @@ class MainWindow(QMainWindow):
         act_confirm = menu.addAction("✓ 确认此题无误")
         act_merge = menu.addAction("🔗 与上一题合并为跨页题")
         act_delete = menu.addAction("🗑️ 删除此题目")
+        menu.addSeparator()
+        act_batch_basket = menu.addAction("🛒 将所有勾选题批量入篮")
 
         idx = self.questions.index(q)
         act_merge.setEnabled(idx > 0)
@@ -1094,6 +1175,8 @@ class MainWindow(QMainWindow):
             self._on_merge_with_previous(qid)
         elif chosen == act_delete:
             self._on_delete_question(qid)
+        elif chosen == act_batch_basket:
+            self._on_batch_add_basket()
 
     def _on_confirm_question(self) -> None:
         """Confirm that the current question's boundaries and metadata are accurate."""
@@ -1355,6 +1438,68 @@ class MainWindow(QMainWindow):
         if files:
             paths = [Path(f) for f in files]
             self._on_open_batch_analysis(initial_paths=paths)
+
+    def _on_batch_add_basket(self) -> None:
+        """Batch add all currently checked questions into GLOBAL_BASKET."""
+        checked_qs = [q for q in self.questions if q.selected]
+        if not checked_qs:
+            QMessageBox.information(
+                self,
+                "试题篮提示",
+                "当前未勾选任何题目！\n请先在左侧题目列表中勾选（打勾）需要入篮的题目，或点击【全选】后再操作。",
+            )
+            return
+
+        added_count = GLOBAL_BASKET.add_questions(checked_qs)
+        updated_count = len(checked_qs) - added_count
+
+        self._update_basket_badge()
+        msg = f"已将 {len(checked_qs)} 道勾选题添加至试题篮 (新增 {added_count} 题，总计 {GLOBAL_BASKET.count()} 题)"
+        self.statusBar().showMessage(msg, 4000)
+        QMessageBox.information(
+            self,
+            "加入试题篮成功",
+            f"已成功将勾选的 {len(checked_qs)} 道题目加入组卷试题篮！\n\n"
+            f"• 新增入篮: {added_count} 道\n"
+            f"• 篮内已存在(已更新): {updated_count} 道\n"
+            f"• 当前试题篮总计: {GLOBAL_BASKET.count()} 道题目\n\n"
+            "可随时点击顶部【组卷试题篮】查看、排序或导出试卷与题库。",
+        )
+
+    def _sync_template_combo(self, selected_name: Optional[str] = None) -> None:
+        """Populate the toolbar template dropdown with all available templates."""
+        if not hasattr(self, "combo_template"):
+            return
+        self.combo_template.blockSignals(True)
+        self.combo_template.clear()
+
+        all_templates = PaperTemplateStorage.get_all_templates()
+        target = selected_name or PaperTemplateStorage.get_active_template_name()
+
+        target_idx = 0
+        for idx, name in enumerate(all_templates.keys()):
+            prefix = "📌 " if PaperTemplateStorage.is_builtin(name) else "⭐ "
+            self.combo_template.addItem(f"{prefix}{name}", name)
+            if name == target:
+                target_idx = idx
+
+        self.combo_template.setCurrentIndex(target_idx)
+        self.combo_template.blockSignals(False)
+
+    def _on_toolbar_template_changed(self, index: int) -> None:
+        """Handle user changing template from toolbar dropdown."""
+        tpl_name = self.combo_template.currentData()
+        if tpl_name:
+            PaperTemplateStorage.set_active_template_name(tpl_name)
+
+    def _on_open_template_dialog(self) -> None:
+        """Open modal to configure, customize, or save paper structure templates."""
+        cur_tpl = self.combo_template.currentData() if hasattr(self, "combo_template") else None
+        pdf_name = self.pdf_reader.pdf_path.name if self.pdf_reader else None
+        dlg = PaperTemplateDialog(current_template_name=cur_tpl, pdf_name=pdf_name, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            chosen = dlg.get_template_name()
+            self._sync_template_combo(selected_name=chosen)
 
     def _on_select_all(self) -> None:
         self.question_list_widget.blockSignals(True)

@@ -1,0 +1,25 @@
+你是一个试卷题目边界冲突裁决分析器。
+
+当前局部区域中存在相邻或重叠的题目候选区域：第 {q1_number} 题 与 第 {q2_number} 题。
+
+【任务要求】
+1. 观察当前图像，分别给出第 {q1_number} 题 与 第 {q2_number} 题在当前图像中的非重叠真实归一化 bbox [x1, y1, x2, y2]。
+2. 确保两题之间界限分明，不发生相互吞噬或重叠。
+
+【输出格式】
+必须严格输出纯 JSON 对象：
+{
+  "schema_version": "vaql-verify-v1",
+  "questions": [
+    {
+      "question_number": "{q1_number}",
+      "bbox": [0.02, 0.05, 0.98, 0.48],
+      "confidence": 0.95
+    },
+    {
+      "question_number": "{q2_number}",
+      "bbox": [0.02, 0.52, 0.98, 0.95],
+      "confidence": 0.95
+    }
+  ]
+}

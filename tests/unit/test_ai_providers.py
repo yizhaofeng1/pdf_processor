@@ -176,3 +176,60 @@ def test_sanitize_normalized_bbox():
     res_deg = _sanitize_normalized_bbox([0.1, 0.2, 0.101, 0.201])
     assert res_deg is None
 
+
+def test_fetch_available_models_real_error_handling(monkeypatch):
+    """Verify fetch_available_models propagates real errors and does NOT return fake hardcoded models."""
+    import httpx
+
+    # 1. Test OpenAICompatProvider error propagation
+    p_deepseek = ProviderFactory.create_provider("deepseek", api_key="sk-invalid")
+
+    # Mock 401 error
+    class MockResp401:
+        status_code = 401
+        text = "Authentication failed"
+
+    class MockClient401:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def get(self, *args, **kwargs):
+            return MockResp401()
+
+    monkeypatch.setattr(p_deepseek, "create_http_client", lambda: MockClient401())
+    with pytest.raises(RuntimeError) as exc_info:
+        p_deepseek.fetch_available_models()
+    assert "401" in str(exc_info.value)
+
+    # Mock 200 success
+    class MockResp200:
+        status_code = 200
+        def json(self):
+            return {"data": [{"id": "deepseek-chat"}, {"id": "deepseek-reasoner"}]}
+
+    class MockClient200:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def get(self, *args, **kwargs):
+            return MockResp200()
+
+    monkeypatch.setattr(p_deepseek, "create_http_client", lambda: MockClient200())
+    models = p_deepseek.fetch_available_models()
+    assert models == ["deepseek-chat", "deepseek-reasoner"]
+
+    # 2. Test Gemini missing key raises error
+    p_gemini = ProviderFactory.create_provider("gemini", api_key="")
+    with pytest.raises(ValueError) as exc_info:
+        p_gemini.fetch_available_models()
+    assert "API Key" in str(exc_info.value)
+
+    # 3. Test Claude missing key raises error
+    p_claude = ProviderFactory.create_provider("claude", api_key="")
+    with pytest.raises(ValueError) as exc_info:
+        p_claude.fetch_available_models()
+    assert "API Key" in str(exc_info.value)
+
+
