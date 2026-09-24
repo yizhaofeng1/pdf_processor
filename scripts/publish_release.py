@@ -164,12 +164,8 @@ def main():
 
         if filename in existing_assets:
             item = existing_assets[filename]
-            if item.get("state") == "uploaded":
-                print(f"✓ Asset {filename} is already uploaded and valid (ID: {item['id']}). Skipping.", flush=True)
-                continue
-            else:
-                print(f"Deleting incomplete asset {filename} (ID: {item['id']})...", flush=True)
-                session.delete(f"https://api.github.com/repos/{repo}/releases/assets/{item['id']}")
+            print(f"Deleting existing asset {filename} (ID: {item['id']}) to upload updated build...", flush=True)
+            session.delete(f"https://api.github.com/repos/{repo}/releases/assets/{item['id']}")
 
         upload_url = f"{upload_base}?name={urllib.parse.quote(filename)}"
         upload_headers = {
