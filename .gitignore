@@ -62,5 +62,8 @@ experiments/
 *.swo
 *Zone.Identifier
 .DS_Store
-models/
+models/*
+!models/README.md
+!models/模型存放与运行说明.txt
+!models/.gitkeep
 *.gguf

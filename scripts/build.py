@@ -6,11 +6,21 @@ Avoids cmd.exe / bash encoding issues.
 
 import os
 import sys
+import io
 import shutil
 import zipfile
 import tarfile
 import subprocess
 from pathlib import Path
+
+# Ensure UTF-8 output on Windows console (e.g. GitHub Actions cp1252)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Ensure working directory is project root
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -139,6 +149,16 @@ def package_distribution() -> None:
         sys.exit(1)
 
     print(f"核心可执行程序生成成功: {exe_path}")
+
+    # Prepare clean models directory and instructions in release package
+    dist_models = dist_app / "models"
+    dist_models.mkdir(parents=True, exist_ok=True)
+    models_readme = BASE_DIR / "models" / "README.md"
+    if models_readme.exists():
+        shutil.copy2(models_readme, dist_models / "README.md")
+    models_guide = BASE_DIR / "models" / "模型存放与运行说明.txt"
+    if models_guide.exists():
+        shutil.copy2(models_guide, dist_models / "模型存放与运行说明.txt")
 
     if is_windows:
         zip_path = dist_dir / "ExamSplitAI_Windows_x64.zip"

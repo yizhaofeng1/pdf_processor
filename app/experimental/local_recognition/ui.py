@@ -11,7 +11,8 @@ Implements UI workbench for:
 
 from typing import Dict, List, Optional
 from pathlib import Path
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from app.models.question import Question
 from app.pdf.reader import PDFReader
-from ..local_ai.config import LocalModelConfig, get_default_config
+from ..local_ai.config import LocalModelConfig, get_default_config, get_models_dir, scan_local_models
 from ..local_ai.local_vlm import OpenAILocalVLMProvider
 from ..local_ai.types import LocalPageAnalysis
 from .service import LocalAnalysisService
@@ -105,14 +106,29 @@ class LocalRecognitionExperimentDialog(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(10)
 
-        # Header description
+        # Header description and actions
+        h_header = QHBoxLayout()
         lbl_desc = QLabel(
             "<b>本地轻量级模型流水线实验</b>：基于主流文档解析架构 "
             "（PyMuPDF 原生版面/文本 + 题号图与双栏拓扑 + 几何边界求解 + 本地小 VLM 疑难复核），"
             "完全离线运行，切除题目边界后可直接导入工作区无损导出。"
         )
         lbl_desc.setWordWrap(True)
-        main_layout.addWidget(lbl_desc)
+        h_header.addWidget(lbl_desc, stretch=1)
+
+        btn_guide = QPushButton("📖 模型使用指引")
+        btn_guide.setFixedHeight(30)
+        btn_guide.setStyleSheet("background-color: #E0E7FF; color: #3730A3; font-weight: bold; border-radius: 4px; padding: 0 8px;")
+        btn_guide.clicked.connect(self._on_show_guide)
+        h_header.addWidget(btn_guide)
+
+        btn_open_models = QPushButton("📂 打开 models 目录")
+        btn_open_models.setFixedHeight(30)
+        btn_open_models.setStyleSheet("background-color: #F3F4F6; color: #1F2937; border-radius: 4px; padding: 0 8px;")
+        btn_open_models.clicked.connect(self._on_open_models_dir)
+        h_header.addWidget(btn_open_models)
+
+        main_layout.addLayout(h_header)
 
         # Configuration Box
         cfg_box = QGroupBox("⚙️ 本地模型与服务配置")
@@ -134,6 +150,19 @@ class LocalRecognitionExperimentDialog(QDialog):
         self.btn_test_conn.clicked.connect(self._on_test_connection)
         h_model.addWidget(self.btn_test_conn)
         cfg_form1.addLayout(h_model)
+
+        # Detected models in models/ folder
+        h_local = QHBoxLayout()
+        h_local.addWidget(QLabel("检测 models/:"))
+        self.combo_local_models = QComboBox()
+        self.combo_local_models.currentIndexChanged.connect(self._on_local_model_selected)
+        h_local.addWidget(self.combo_local_models, stretch=1)
+        self.btn_refresh_models = QPushButton("🔄")
+        self.btn_refresh_models.setToolTip("重新扫描 models/ 目录中的模型")
+        self.btn_refresh_models.clicked.connect(self._refresh_local_models)
+        h_local.addWidget(self.btn_refresh_models)
+        cfg_form1.addLayout(h_local)
+
         cfg_layout.addLayout(cfg_form1, stretch=2)
 
         # Mode & Scope
@@ -218,6 +247,92 @@ class LocalRecognitionExperimentDialog(QDialog):
         h_bottom.addWidget(btn_close)
 
         main_layout.addLayout(h_bottom)
+        self._refresh_local_models()
+
+    def _refresh_local_models(self) -> None:
+        """Scan models/ directory and populate the combo box."""
+        self.combo_local_models.blockSignals(True)
+        self.combo_local_models.clear()
+        models = scan_local_models()
+        if not models:
+            self.combo_local_models.addItem("（未检测到模型，可点击右上方指引下载）", None)
+        else:
+            self.combo_local_models.addItem(f"检测到 {len(models)} 个模型项（点击切换）", None)
+            for m in models:
+                self.combo_local_models.addItem(f"📦 {m['name']} ({m['size_str']})", m)
+        self.combo_local_models.blockSignals(False)
+
+    def _on_local_model_selected(self, index: int) -> None:
+        """Handle selection of local model from models/ directory."""
+        data = self.combo_local_models.currentData()
+        if not data or not isinstance(data, dict):
+            return
+        m_name = data.get("name", "")
+        if "qwen2.5" in m_name.lower():
+            self.txt_model.setText("qwen2.5vl:3b")
+        else:
+            self.txt_model.setText(m_name)
+        self.lbl_status.setText(f"已选中本地模型: {data.get('filename')}。可通过 llama-server 启动或使用 Ollama 对应模型。")
+
+    def _on_open_models_dir(self) -> None:
+        """Open models directory in system file manager."""
+        models_dir = get_models_dir()
+        models_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(models_dir)))
+
+    def _on_show_guide(self) -> None:
+        """Show dialog explaining how to download and run local models."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📖 本地模型下载与运行指引")
+        dlg.resize(680, 520)
+        vbox = QVBoxLayout(dlg)
+        vbox.setSpacing(10)
+
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setHtml("""
+        <h3>💡 ExamSplit AI 本地离线切题与模型使用指引</h3>
+        <p>ExamSplit AI 支持以下三种本地运行方式，可根据您的环境灵活选用：</p>
+        <hr>
+        <h4>【方式一：极速规则模式】（最推荐，0 显存，0 门槛，0 秒延迟）</h4>
+        <ul>
+          <li><b>无需下载任何模型</b>，不占用显存与内存！</li>
+          <li>在运行模式中选择<b>【极速规则模式 (仅本地规则，0秒VLM延迟)】</b>。</li>
+          <li>内置工业级版面拓扑与几何边界求解引擎，90% 以上标准试卷（考研数学、高考数学等）均可秒级 100% 精准切分！</li>
+        </ul>
+        <hr>
+        <h4>【方式二：Ollama 一键托管运行】（推荐拥有独显的用户）</h4>
+        <ol>
+          <li>从官网下载安装 <a href="https://ollama.com">Ollama</a>；</li>
+          <li>打开系统终端或 PowerShell 执行：<br>
+            <code>ollama run qwen2.5vl:3b</code>
+          </li>
+          <li>启动后，在当前仪表盘中保持默认端点 <code>http://127.0.0.1:11434/v1</code>，点击<b>【测试连接】</b>即可直连！</li>
+        </ol>
+        <hr>
+        <h4>【方式三：放入 models/ 目录并通过 llama-server 启动】</h4>
+        <ol>
+          <li>从 HuggingFace 或 ModelScope 魔搭社区搜索并下载 GGUF 视觉模型（推荐 <b>Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf</b>）；</li>
+          <li>将下载好的 <code>.gguf</code> 文件直接放入本软件根目录的 <b><code>models/</code></b> 文件夹中；</li>
+          <li>使用 llama.cpp 自带的 <code>llama-server</code> 启动（支持 Windows / Linux / macOS）：<br>
+            <code>llama-server -m models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf --port 11434 -ngl 99 -c 4096</code>
+          </li>
+          <li>启动后在仪表盘中点击【测试连接】即可对接本地加速推理。</li>
+        </ol>
+        """)
+        vbox.addWidget(txt, stretch=1)
+
+        btn_row = QHBoxLayout()
+        btn_open = QPushButton("📂 打开本地 models/ 目录")
+        btn_open.clicked.connect(self._on_open_models_dir)
+        btn_row.addWidget(btn_open)
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        vbox.addLayout(btn_row)
+
+        dlg.exec()
 
     def _get_current_config(self) -> LocalModelConfig:
         cfg = get_default_config()

@@ -3,6 +3,12 @@
 # ==============================================================================
 $ErrorActionPreference = "Stop"
 
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUTF8 = "1"
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location "$ScriptDir/.."
 

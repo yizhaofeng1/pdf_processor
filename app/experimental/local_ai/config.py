@@ -1,12 +1,50 @@
-"""Configuration parameters and paths for the local AI pipeline."""
-
-import os
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-MODELS_DIR = PROJECT_ROOT / "models"
+
+
+def get_models_dir() -> Path:
+    """Get the models directory, supporting both dev mode and PyInstaller frozen bundle."""
+    if getattr(sys, "frozen", False):
+        exe_models = Path(sys.executable).parent / "models"
+        if exe_models.exists():
+            return exe_models
+    return PROJECT_ROOT / "models"
+
+
+def scan_local_models() -> List[Dict[str, str]]:
+    """Scan models directory for GGUF model files and model subdirectories."""
+    models_dir = get_models_dir()
+    found = []
+    if not models_dir.exists():
+        return found
+    # Scan for .gguf files
+    for f in sorted(models_dir.glob("*.gguf")) + sorted(models_dir.glob("*/*.gguf")):
+        size_gb = f.stat().st_size / (1024 ** 3)
+        found.append({
+            "name": f.stem,
+            "filename": f.name,
+            "path": str(f),
+            "size_str": f"{size_gb:.1f} GB" if size_gb >= 0.1 else f"{f.stat().st_size / (1024 ** 2):.0f} MB",
+            "type": "gguf",
+        })
+    # Scan for subdirectories
+    for d in sorted(models_dir.iterdir()):
+        if d.is_dir() and not d.name.startswith(".") and not any(m["path"].startswith(str(d)) for m in found):
+            found.append({
+                "name": d.name,
+                "filename": d.name,
+                "path": str(d),
+                "size_str": "目录",
+                "type": "dir",
+            })
+    return found
+
+
+MODELS_DIR = get_models_dir()
 PROMPTS_DIR = PROJECT_ROOT / "prompts" / "local"
 
 
