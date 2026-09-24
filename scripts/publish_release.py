@@ -9,15 +9,6 @@ import urllib.parse
 from pathlib import Path
 import subprocess
 
-# WSL fake-ip / TUN self-healing resolver
-_orig_getaddrinfo = socket.getaddrinfo
-
-def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    if host in ("api.github.com", "uploads.github.com"):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("20.205.243.166", port))]
-    return _orig_getaddrinfo(host, port, family, type, proto, flags)
-
-socket.getaddrinfo = _patched_getaddrinfo
 
 
 def get_github_token():
@@ -131,6 +122,12 @@ def main():
     if r.status_code == 200:
         release = r.json()
         print(f"Release {target_tag} already exists, ID:", release["id"], flush=True)
+        patch_payload = {
+            "name": "ExamSplit AI v2.0 —— 本地离线轻量模型流水线、DeepSeek专用提示词工程、独立窗口架构与高精切分",
+            "body": body_text,
+        }
+        session.patch(f"https://api.github.com/repos/{repo}/releases/{release['id']}", json=patch_payload)
+        print("Updated release details.", flush=True)
     elif r.status_code == 404:
         print(f"Release {target_tag} does not exist yet. Creating...", flush=True)
         create_payload = {
