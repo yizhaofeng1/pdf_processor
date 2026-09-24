@@ -356,3 +356,58 @@ def test_boundary_resolver_anti_engulfment():
         h = seg.normalized_bbox[3] - seg.normalized_bbox[1]
         assert h >= 0.05, f"Question {q.display_number} height {h} is too small"
 
+
+def test_boundary_resolver_resists_stray_right_marker():
+    """Ensure a stray noisy marker on the right does not trick the resolver into two-column mode."""
+    resolver = BoundaryResolver()
+    markers = [
+        QuestionMarker(number=str(i), page_index=1, normalized_point=(0.05, 0.10 + i * 0.05))
+        for i in range(1, 10)
+    ]
+    # Add 1 stray marker on the far right (like an option fraction denominator)
+    markers.append(QuestionMarker(number="12", page_index=1, normalized_point=(0.86, 0.10)))
+
+    questions = resolver.resolve_page_questions(markers, page_index=1)
+    # Must NOT be two-column: content width must be full single-column (~0.92)
+    for q in questions:
+        seg = q.segments[0]
+        width = seg.normalized_bbox[2] - seg.normalized_bbox[0]
+        assert width >= 0.90, f"Question {q.display_number} was cut in half to width {width}"
+
+
+def test_boundary_resolver_large_question_full_width_protection():
+    """Ensure large questions (大题) expand to full width if no neighbor shares vertical space."""
+    resolver = BoundaryResolver()
+    # 2 small questions in two columns at top, 1 large question at bottom
+    markers = [
+        QuestionMarker(number="1", page_index=0, normalized_point=(0.05, 0.10), question_type=QuestionType.SMALL),
+        QuestionMarker(number="2", page_index=0, normalized_point=(0.05, 0.25), question_type=QuestionType.SMALL),
+        QuestionMarker(number="3", page_index=0, normalized_point=(0.55, 0.10), question_type=QuestionType.SMALL),
+        QuestionMarker(number="4", page_index=0, normalized_point=(0.55, 0.25), question_type=QuestionType.SMALL),
+        QuestionMarker(number="15", page_index=0, normalized_point=(0.05, 0.50), question_type=QuestionType.LARGE),
+    ]
+
+    questions = resolver.resolve_page_questions(markers, page_index=0)
+    q15 = next(q for q in questions if q.display_number == "15")
+    q15_seg = q15.segments[0]
+    width = q15_seg.normalized_bbox[2] - q15_seg.normalized_bbox[0]
+    assert width >= 0.90, f"Q15 was cut in half: width={width}"
+
+
+def test_boundary_resolver_near_bottom_safety():
+    """Ensure marker near page bottom (y >= 0.98) never triggers y1 >= y2 ValidationError."""
+    resolver = BoundaryResolver()
+    markers = [
+        QuestionMarker(number="21", page_index=1, normalized_point=(0.05, 0.85)),
+        QuestionMarker(number="22", page_index=1, normalized_point=(0.05, 0.982)),
+    ]
+
+    questions = resolver.resolve_page_questions(markers, page_index=1)
+    assert len(questions) == 2
+    for q in questions:
+        seg = q.segments[0]
+        assert seg.normalized_bbox[1] < seg.normalized_bbox[3]
+        assert 0.0 <= seg.normalized_bbox[1] <= 1.0
+        assert 0.0 <= seg.normalized_bbox[3] <= 1.0
+
+

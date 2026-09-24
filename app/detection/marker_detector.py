@@ -121,6 +121,26 @@ class NativeTextMarkerDetector:
                 nx = max(0.0, min(1.0, bx0 / page_w))
                 ny = max(0.0, min(1.0, ly0 / page_h))
 
+                # Filter Rule 1: No valid exam question starts in the far-right margin (> 0.68)
+                if nx > 0.68:
+                    continue
+
+                # Filter Rule 2: Standalone digit without Chinese text in block, or block contains options (A)/(B)/(C)/(D)
+                # (e.g. choice fraction denominators '4.', '3.', '2.', '12.')
+                is_solitary_num = bool(re.match(r"^\d{1,2}[．\.\、]?$", line))
+                if is_solitary_num:
+                    has_chinese = bool(re.search(r"[\u4e00-\u9fa5]", text))
+                    has_options = bool(re.search(r"[\(（\[]?[A-D][\)）\]\.]", text))
+                    if has_options or not has_chinese:
+                        continue
+
+                # Filter Rule 3: Sub-question suppression: bracketed small numbers (1)/(2)/(3)/(4)
+                # when inside a LARGE (解答题) section or after Page 0
+                is_bracketed_small_num = bool(re.match(r"^[\(（【\[]\s*([1-9])\s*[\)）】\]]", line))
+                if is_bracketed_small_num and int(num_str) <= 4:
+                    if current_section_type == QuestionType.LARGE or (page_index > 0 and any(m.number not in ('1', '2', '3', '4') for m in markers)):
+                        continue
+
                 # Infer question type based on section or typical Chinese math exam conventions
                 q_type = current_section_type
                 if not q_type:
@@ -142,6 +162,23 @@ class NativeTextMarkerDetector:
                     raw_text=line[:60],
                 )
                 markers.append(marker)
+
+        # Deduplicate same-number candidates on the same page (e.g. prefer line with actual question text)
+        if len(markers) > 1:
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for m in markers:
+                grouped[m.number].append(m)
+            
+            deduped: List[QuestionMarker] = []
+            for num_key, items in grouped.items():
+                if len(items) == 1:
+                    deduped.append(items[0])
+                else:
+                    # Prefer item with Chinese characters in raw_text
+                    with_cn = [it for it in items if re.search(r"[\u4e00-\u9fa5]", it.raw_text)]
+                    deduped.append(with_cn[0] if with_cn else items[0])
+            markers = deduped
 
         # Sort markers by vertical reading order (top-to-bottom)
         markers.sort(key=lambda m: m.normalized_point[1])

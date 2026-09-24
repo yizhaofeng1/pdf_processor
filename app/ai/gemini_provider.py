@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Tuple, List
+from typing import Tuple, List, Optional, Any
 from pathlib import Path
 
 from .base import VisionModelProvider, encode_image_base64
@@ -33,6 +33,8 @@ class GeminiProvider(VisionModelProvider):
         model_name: str = "gemini-2.5-flash",
         timeout: float = 60.0,
         proxy: str = "",
+        custom_prompt: Optional[str] = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(
             provider_id=provider_id,
@@ -41,6 +43,7 @@ class GeminiProvider(VisionModelProvider):
             model_name=model_name or "gemini-2.5-flash",
             timeout=timeout,
             proxy=proxy,
+            custom_prompt=custom_prompt,
         )
 
     def _get_api_root(self) -> str:
@@ -129,7 +132,12 @@ class GeminiProvider(VisionModelProvider):
         root = self._get_api_root()
         endpoint = f"{root}/models/{clean_model}:generateContent?key={self.api_key}"
 
-        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
+        hints = dict(request.context_hints or {})
+        hints.setdefault("model_name", self.model_name)
+        hints.setdefault("provider_id", self.provider_id)
+        if self.custom_prompt and "custom_prompt" not in hints:
+            hints["custom_prompt"] = self.custom_prompt
+        system_prompt = PromptManager.get_system_prompt("detect_markers", hints)
 
         parts: list[dict] = []
         for img_path in request.image_paths:
@@ -141,7 +149,7 @@ class GeminiProvider(VisionModelProvider):
                 }
             })
 
-        structure_hint = (request.context_hints or {}).get("paper_structure", "").strip()
+        structure_hint = hints.get("paper_structure", "").strip()
         user_prompt_text = "请识别上述试卷页面中的所有独立题目与边界坐标。"
         if structure_hint:
             user_prompt_text += f"\n【试卷大纲结构参考分布】：\n{structure_hint}"

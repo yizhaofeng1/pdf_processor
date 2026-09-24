@@ -28,6 +28,7 @@ class VisionModelProvider(ABC):
         model_name: str,
         timeout: float = 60.0,
         proxy: Optional[str] = None,
+        custom_prompt: Optional[str] = None,
     ) -> None:
         self.provider_id = provider_id
         self.base_url = base_url.rstrip("/")
@@ -35,6 +36,7 @@ class VisionModelProvider(ABC):
         self.model_name = model_name
         self.timeout = timeout
         self.proxy = proxy or None
+        self.custom_prompt = custom_prompt.strip() if custom_prompt else None
 
     def create_http_client(self) -> httpx.Client:
         """Create an httpx client configured with timeout and optional proxy."""

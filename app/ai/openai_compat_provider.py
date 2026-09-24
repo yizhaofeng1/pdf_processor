@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 from pathlib import Path
 
 from .base import VisionModelProvider, encode_image_base64
@@ -24,6 +24,8 @@ class OpenAICompatProvider(VisionModelProvider):
         model_name: str = "gpt-4o",
         timeout: float = 60.0,
         proxy: str = "",
+        custom_prompt: Optional[str] = None,
+        **kwargs: Any,
     ) -> None:
         normalized_url = base_url.strip().rstrip("/")
         # Official OpenAI requires /v1
@@ -37,6 +39,7 @@ class OpenAICompatProvider(VisionModelProvider):
             model_name=model_name or "gpt-4o",
             timeout=timeout,
             proxy=proxy,
+            custom_prompt=custom_prompt,
         )
 
     def _get_headers(self) -> dict[str, str]:
@@ -125,9 +128,14 @@ class OpenAICompatProvider(VisionModelProvider):
             raise ValueError(f"未配置 {self.provider_id} API Key")
 
         endpoint = self._get_chat_endpoint()
-        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
+        hints = dict(request.context_hints or {})
+        hints.setdefault("model_name", self.model_name)
+        hints.setdefault("provider_id", self.provider_id)
+        if self.custom_prompt and "custom_prompt" not in hints:
+            hints["custom_prompt"] = self.custom_prompt
+        system_prompt = PromptManager.get_system_prompt("detect_markers", hints)
 
-        structure_hint = (request.context_hints or {}).get("paper_structure", "").strip()
+        structure_hint = hints.get("paper_structure", "").strip()
         user_prompt_text = "请根据给出的试卷页面图像，识别所有独立题目及其完整边界区域。"
         if structure_hint:
             user_prompt_text += f"\n【试卷大纲结构参考分布】：\n{structure_hint}"

@@ -72,6 +72,29 @@ class BoundaryResolver:
                 x_right=self.default_right_margin,
             )
             raw_questions = left_questions + right_questions
+
+            # Post-process: Expand Large Questions (大题) to full page width if they have no horizontal neighbor
+            for q in raw_questions:
+                if self._is_large_question(q) and q.segments:
+                    q_seg = q.segments[0]
+                    qy1, qy2 = q_seg.normalized_bbox[1], q_seg.normalized_bbox[3]
+                    has_neighbor = any(
+                        other.id != q.id
+                        and other.segments
+                        and other.segments[0].page_index == page_index
+                        and not (
+                            other.segments[0].normalized_bbox[3] <= qy1 + 0.01
+                            or other.segments[0].normalized_bbox[1] >= qy2 - 0.01
+                        )
+                        for other in raw_questions
+                    )
+                    if not has_neighbor:
+                        q_seg.normalized_bbox = (
+                            self.default_left_margin,
+                            q_seg.normalized_bbox[1],
+                            self.default_right_margin,
+                            q_seg.normalized_bbox[3],
+                        )
         else:
             sorted_markers = sorted(markers, key=lambda m: m.normalized_point[1])
             raw_questions = self._resolve_column(
@@ -88,13 +111,29 @@ class BoundaryResolver:
         return raw_questions
 
     def _detect_two_column(self, markers: List[QuestionMarker]) -> bool:
-        """Heuristic to detect if questions are arranged in two columns."""
-        if len(markers) < 2:
+        """Heuristic to detect if questions are arranged in two columns.
+        
+        Requires:
+        1. At least 4 markers on the page.
+        2. At least 2 markers in the left column (x < split_threshold - 0.05).
+        3. At least 2 markers in the right column within normal column bounds (split_threshold - 0.05 <= x <= 0.70).
+        4. Right-column markers must make up at least 25% of total markers.
+        """
+        if len(markers) < 4:
             return False
 
-        has_left = any(m.normalized_point[0] < self.column_split_threshold - 0.05 for m in markers)
-        has_right = any(m.normalized_point[0] >= self.column_split_threshold for m in markers)
-        return has_left and has_right
+        left_markers = [m for m in markers if m.normalized_point[0] < self.column_split_threshold - 0.05]
+        right_markers = [
+            m for m in markers
+            if self.column_split_threshold - 0.05 <= m.normalized_point[0] <= 0.70
+        ]
+        if len(left_markers) < 2 or len(right_markers) < 2:
+            return False
+
+        if (len(right_markers) / len(markers)) < 0.25:
+            return False
+
+        return True
 
     def _is_large_question(self, q_or_marker: Any) -> bool:
         """Determine whether a question is a large question (大题).
@@ -162,9 +201,15 @@ class BoundaryResolver:
                     next_start = min(next_marker_y, markers[i + 1].normalized_bbox[1])
                 else:
                     next_start = next_marker_y
-                max_allowed_y2 = clamp(next_start - self.bottom_safety_margin, y1_default + 0.02, 0.98)
+                max_allowed_y2 = clamp(next_start - self.bottom_safety_margin, y1_default + 0.015, 0.99)
             else:
-                max_allowed_y2 = self.page_bottom_limit
+                is_sub_column = (x_right - x_left) < 0.60
+                if is_sub_column and not self._is_large_question(marker):
+                    # In a multi-column sub-column, an isolated small question shouldn't swallow the whole page
+                    max_allowed_y2 = min(self.page_bottom_limit, y1_default + 0.25)
+                else:
+                    max_allowed_y2 = max(self.page_bottom_limit, min(0.99, y1_default + 0.03))
+                max_allowed_y2 = max(max_allowed_y2, min(0.99, y1_default + 0.02))
 
             # If marker already came with a pre-validated AI bbox, prioritize and validate it
             if marker.normalized_bbox and len(marker.normalized_bbox) == 4:
@@ -192,6 +237,13 @@ class BoundaryResolver:
                     bbox = (x_left, y1_default, x_right, max_allowed_y2)
             else:
                 bbox = (x_left, y1_default, x_right, max_allowed_y2)
+
+            # Mathematical validation: strictly guarantee x1 < x2 and y1 < y2 in [0.0, 1.0]
+            final_x1 = clamp(bbox[0], 0.0, 0.97)
+            final_x2 = clamp(bbox[2], final_x1 + 0.02, 1.0)
+            final_y1 = clamp(bbox[1], 0.0, 0.98)
+            final_y2 = clamp(bbox[3], final_y1 + 0.015, 1.0)
+            bbox = (final_x1, final_y1, final_x2, final_y2)
 
             prev_end_y = bbox[3]
 

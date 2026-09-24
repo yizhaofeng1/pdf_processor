@@ -1,7 +1,6 @@
-"""Question domain model."""
-
 from enum import Enum
-from pydantic import BaseModel, Field
+from typing import Any
+from pydantic import BaseModel, Field, field_validator
 import uuid
 from .segment import QuestionSegment
 
@@ -55,6 +54,13 @@ class Question(BaseModel):
     user_modified: bool = False
     reason_codes: list[str] = Field(default_factory=list)
     status: QuestionStatus = QuestionStatus.DETECTED
+
+    @field_validator("source_pdf_path", mode="before")
+    @classmethod
+    def _coerce_source_pdf_path(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        return str(v)
 
     def is_small_question(self) -> bool:
         """Check if this is a small question (choice, fill-in, or compact)."""

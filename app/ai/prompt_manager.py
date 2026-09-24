@@ -16,16 +16,43 @@ class PromptManager:
             raise FileNotFoundError(f"Prompt template not found: {path}")
         return path.read_text(encoding="utf-8").strip()
 
+    @staticmethod
+    def get_default_prompt(model_or_provider: str = "") -> str:
+        """Return the default system prompt template for a given model or provider."""
+        low = model_or_provider.lower()
+        if "deepseek" in low:
+            ds_path = PROMPTS_DIR / "detect_markers_deepseek.txt"
+            if ds_path.exists():
+                return ds_path.read_text(encoding="utf-8").strip()
+        default_path = PROMPTS_DIR / "detect_markers.txt"
+        return default_path.read_text(encoding="utf-8").strip()
+
     @classmethod
     def get_system_prompt(
         cls,
         task_type: str = "detect_markers",
         context_hints: Optional[dict[str, str]] = None,
+        custom_system_prompt: Optional[str] = None,
     ) -> str:
         """Return standardized system prompt enforcing ExamSplit JSON Protocol with optional structure hints."""
-        base_prompt = cls.load_prompt(task_type)
+        hints = context_hints or {}
+        # Priority 1: explicitly passed custom_system_prompt
+        # Priority 2: custom_prompt / custom_system_prompt in context_hints
+        effective_custom = custom_system_prompt or hints.get("custom_prompt") or hints.get("custom_system_prompt")
 
-        structure_hint = (context_hints or {}).get("paper_structure", "").strip()
+        if effective_custom and effective_custom.strip():
+            base_prompt = effective_custom.strip()
+        else:
+            model_key = f"{hints.get('provider_id', '')}_{hints.get('model_name', '')}"
+            if "deepseek" in model_key.lower() or task_type == "detect_markers_deepseek":
+                try:
+                    base_prompt = cls.load_prompt("detect_markers_deepseek")
+                except Exception:
+                    base_prompt = cls.load_prompt(task_type)
+            else:
+                base_prompt = cls.load_prompt(task_type)
+
+        structure_hint = hints.get("paper_structure", "").strip()
         structure_block = ""
         if structure_hint:
             structure_block = (

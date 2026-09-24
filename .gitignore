@@ -42,6 +42,7 @@ data/*.json
 data/*.pdf
 data/*.log
 data/experiments/
+data/benchmark/
 data/cache/*
 data/thumbnails/*
 data/projects/*
@@ -50,6 +51,9 @@ data/projects/*
 !data/projects/.gitkeep
 .env
 *.local.json
+key.txt
+key*.txt
+experiments/
 
 # OS & IDE
 .vscode/

@@ -34,9 +34,13 @@ class QuestionBasketDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.basket = basket or GLOBAL_BASKET
-        self.setWindowTitle("🧺 组卷试题篮 —— 跨试卷精选题库管理")
-        self.resize(880, 620)
-        self.setModal(True)
+        self.setWindowTitle("🧺 组卷试题篮管理仪表盘")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(860, 580)
+        self.setMinimumSize(580, 360)
+        self.setSizeGripEnabled(True)
+        self._export_window: Optional[ExportDialog] = None
 
         self._setup_ui()
         self._refresh_list()
@@ -244,5 +248,23 @@ class QuestionBasketDialog(QDialog):
         for q in questions:
             q.selected = True
 
+        if self._export_window is not None:
+            self._export_window.selected_questions = questions
+            self._export_window.show()
+            self._export_window.raise_()
+            self._export_window.activateWindow()
+            return
         dlg = ExportDialog(source_pdf=source_pdf, selected_questions=questions, parent=self)
-        dlg.exec()
+        dlg.finished.connect(lambda: setattr(self, "_export_window", None))
+        self._export_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        if self._export_window is not None:
+            try:
+                self._export_window.close()
+            except Exception:
+                pass
+        super().closeEvent(event)

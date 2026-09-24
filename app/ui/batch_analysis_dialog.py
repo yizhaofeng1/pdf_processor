@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFileDialog,
     QCheckBox,
+    QComboBox,
     QMessageBox,
     QAbstractItemView,
 )
@@ -44,8 +45,13 @@ class BatchAnalysisDialog(QDialog):
         self.results: Dict[str, List[Question]] = {}
         self.pdf_paths: List[Path] = []
 
-        self.setWindowTitle("⚡ 试卷批量后台分析")
-        self.resize(860, 560)
+        self.setWindowTitle("⚡ 试卷批量后台分析仪表盘")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(860, 540)
+        self.setMinimumSize(600, 380)
+        self.setSizeGripEnabled(True)
+        self._template_dialog: Optional[PaperTemplateDialog] = None
         self._init_ui()
 
         if initial_paths:
@@ -399,8 +405,28 @@ class BatchAnalysisDialog(QDialog):
 
     def _on_config_template(self) -> None:
         cur_tpl = self.combo_template.currentData()
+        if self._template_dialog is not None:
+            self._template_dialog.show()
+            self._template_dialog.raise_()
+            self._template_dialog.activateWindow()
+            return
         dlg = PaperTemplateDialog(current_template_name=cur_tpl, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            chosen = dlg.get_template_name()
-            self._refresh_templates(selected_name=chosen)
+        dlg.template_applied.connect(lambda chosen: self._refresh_templates(selected_name=chosen))
+        dlg.finished.connect(lambda: setattr(self, "_template_dialog", None))
+        self._template_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        """Safely cancel batch worker when window is closed."""
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(1000)
+        if self._template_dialog is not None:
+            try:
+                self._template_dialog.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
 

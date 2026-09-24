@@ -55,6 +55,8 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "兼容 OneAPI, NewAPI 或第三方反代网关",
     },
 }
+PROVIDER_PRESETS["openai_compat"] = PROVIDER_PRESETS["custom"]
+
 
 
 class ProviderFactory:
@@ -73,6 +75,7 @@ class ProviderFactory:
         model_name: Optional[str] = None,
         timeout: float = 60.0,
         proxy: str = "",
+        custom_prompt: Optional[str] = None,
     ) -> VisionModelProvider:
         """Create provider instance using given or preset default parameters."""
         preset = PROVIDER_PRESETS.get(provider_id, PROVIDER_PRESETS["custom"])
@@ -90,17 +93,46 @@ class ProviderFactory:
             model_name=resolved_model,
             timeout=timeout,
             proxy=proxy.strip(),
+            custom_prompt=custom_prompt,
         )
 
     @classmethod
     def get_active_provider(cls) -> VisionModelProvider:
         """Load encrypted configuration and create currently active default provider."""
         all_configs = KeyStorage.get_all_configs()
-        default_id = KeyStorage.get_default_provider_id()
         global_proxy = all_configs.get("proxy", "")
 
-        cfg = KeyStorage.get_provider_config(default_id) or {}
+        active_prof = KeyStorage.get_active_profile()
+        if active_prof:
+            provider_id = active_prof.get("provider_id", "gemini")
+            preset = PROVIDER_PRESETS.get(provider_id, PROVIDER_PRESETS["gemini"])
+            base_url = active_prof.get("base_url") or preset["default_base_url"]
+            api_key = active_prof.get("api_key") or ""
+            model_name = active_prof.get("model_name") or preset["default_model"]
+            timeout = float(active_prof.get("timeout") or 60.0)
+            proxy = active_prof.get("proxy") or global_proxy
 
+            prompt_mode = active_prof.get("prompt_mode", "default")
+            custom_prompt = None
+            if prompt_mode == "custom":
+                custom_prompt = active_prof.get("custom_prompt")
+            elif prompt_mode == "builtin_optimized":
+                from .prompt_manager import PromptManager
+                custom_prompt = PromptManager.get_default_prompt(f"{provider_id}_{model_name}")
+
+            return cls.create_provider(
+                provider_id=provider_id,
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                timeout=timeout,
+                proxy=proxy,
+                custom_prompt=custom_prompt,
+            )
+
+        # Fallback legacy
+        default_id = KeyStorage.get_default_provider_id()
+        cfg = KeyStorage.get_provider_config(default_id) or {}
         preset = PROVIDER_PRESETS.get(default_id, PROVIDER_PRESETS["gemini"])
         base_url = cfg.get("base_url") or preset["default_base_url"]
         api_key = cfg.get("api_key") or ""

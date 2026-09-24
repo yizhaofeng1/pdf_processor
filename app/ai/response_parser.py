@@ -130,6 +130,16 @@ def parse_exam_split_json(raw_text: str) -> VisionAnalysisResult:
             except Exception as e:
                 logger.warning(f"Segment validation rejected bbox {bbox}: {e}")
 
+        # Fallback: if LLM put normalized_bbox at question root instead of inside segments
+        if not segments and q_dict.get("normalized_bbox"):
+            sanitized = _sanitize_normalized_bbox(q_dict.get("normalized_bbox"))
+            if sanitized:
+                segments.append(QuestionSegment(
+                    question_id=q_id,
+                    page_index=0,
+                    normalized_bbox=sanitized,
+                ))
+
         # If model returned no segments or single anchor point, fallback will handle it
         q = Question(
             id=q_id,

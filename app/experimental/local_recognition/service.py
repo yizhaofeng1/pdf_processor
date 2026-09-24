@@ -1,429 +1,289 @@
-"""Service orchestration for Local Recognition (VAQL) experiments.
+"""Service orchestrator for the local AI small-model question segmentation pipeline.
 
-Implements:
-1. Virtual Address Pipeline (coarse grounding -> candidate -> local refine -> coordinate projection)
-2. Direct Local Baseline Pipeline (whole-page direct bbox prediction)
-3. Adapter to convert experiment result to formal Question/QuestionSegment models upon user confirmation.
+Coordinates the complete mainstream modular pipeline:
+1. PyMuPDF Native Page Extraction & Rendering
+2. Local Layout Detection (PP-DocLayoutV3 with Native Layout Fallback)
+3. Text Extraction & Hybrid OCR Fusion
+4. Column & Reading Order Detection
+5. Question Marker Detection & Anti-Noise Filtering
+6. Candidate Graph & Option Aggregation
+7. Deterministic Boundary Resolution (Padding, Option Protection, White-space Trimming)
+8. Confidence Evaluation & VLM Routing
+9. Local VLM Visual Verification (on borderline/complex candidates)
+10. Cross-Page Continuity Resolution
+11. Adapter to standard Question/QuestionSegment domain models
 """
 
-from typing import List, Dict, Optional, Callable, Tuple
-from pathlib import Path
-import time
+import base64
+import io
 import logging
-from datetime import datetime, timezone
-from PIL import Image
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import pymupdf as fitz  # PyMuPDF
 
-from .types import (
-    LocalRecognitionExperimentResult,
-    ExperimentRun,
-    CoarsePageOutput,
-    CoarseQuestionOutput,
-    CandidateRect,
-    RefinedQuestionSegment,
-    ExperimentMetrics,
+from app.models.question import Question, QuestionStatus, QuestionType
+from app.models.segment import QuestionSegment
+from ..local_ai.base import LocalLayoutProvider, LocalOCRProvider, LocalVLMProvider
+from ..local_ai.config import LocalModelConfig, get_default_config
+from ..local_ai.layout_backend import get_layout_provider
+from ..local_ai.ocr_backend import get_ocr_provider
+from ..local_ai.local_vlm import OpenAILocalVLMProvider
+from ..local_ai.types import (
+    LayoutElement,
+    LocalPageAnalysis,
+    LocalQuestionCandidate,
+    OCRBlock,
+    QuestionMarker,
 )
-from .config import LocalVisionConfig
-from .provider import LocalVisionProvider, OpenAILocalVisionProvider
-from .virtual_address import parse_virtual_address, format_virtual_address
-from .page_table import VirtualPageTable
-from .tiler import Tiler
-from .prompt_builder import ExperimentPromptBuilder
-from .candidate_builder import CandidateBuilder
-from .local_refiner import LocalRefiner
-from .metrics import MetricsCalculator
-from .result_store import ResultStore
+from ..local_detection.boundary_resolver import LocalBoundaryResolver
+from ..local_detection.candidate_builder import LocalCandidateBuilder
+from ..local_detection.confidence_router import LocalConfidenceRouter
+from ..local_detection.cross_page import LocalCrossPageResolver
+from ..local_detection.marker_detector import LocalMarkerDetector
+from ..local_detection.reading_order import ReadingOrderDetector
 
-from ...pdf.reader import PDFReader
-from ...pdf.coordinate import normalized_to_pdf_rect
-from ...models.question import Question, QuestionType, QuestionStatus
-from ...models.segment import QuestionSegment
-
-logger = logging.getLogger("examsplit.experimental.service")
+logger = logging.getLogger("examsplit.experimental.local_recognition.service")
 
 
-class LocalRecognitionExperimentService:
-    """Orchestrates local VLM experiments without altering the core detection pipeline."""
+class LocalAnalysisService:
+    """End-to-end service for local exam paper analysis and question extraction."""
 
     def __init__(
         self,
-        config: Optional[LocalVisionConfig] = None,
-        provider: Optional[LocalVisionProvider] = None,
-        result_store: Optional[ResultStore] = None,
+        config: Optional[LocalModelConfig] = None,
+        layout_provider: Optional[LocalLayoutProvider] = None,
+        ocr_provider: Optional[LocalOCRProvider] = None,
+        vlm_provider: Optional[LocalVLMProvider] = None,
     ) -> None:
-        self.config = config or LocalVisionConfig()
-        self.provider = provider or OpenAILocalVisionProvider(self.config)
-        self.result_store = result_store or ResultStore()
-        self.prompt_builder = ExperimentPromptBuilder()
-        self.candidate_builder = CandidateBuilder(
-            neighbor_radius=self.config.neighbor_radius,
-            overlap_threshold=self.config.candidate_overlap_threshold,
-            full_width_layout=getattr(self.config, "full_width_layout", True),
-        )
-        self.local_refiner = LocalRefiner(
-            provider=self.provider,
-            prompt_builder=self.prompt_builder,
-            local_dpi=self.config.local_dpi,
-            max_pixels=getattr(self.config, "max_crop_pixels", 1800000),
-        )
+        self.config = config or get_default_config()
+        self.layout_provider = layout_provider or get_layout_provider(self.config)
+        self.ocr_provider = ocr_provider or get_ocr_provider(self.config)
+        self.vlm_provider = vlm_provider or OpenAILocalVLMProvider(self.config)
 
-    def run_virtual_address_pipeline(
+        self.reading_order_detector = ReadingOrderDetector()
+        self.marker_detector = LocalMarkerDetector()
+        self.candidate_builder = LocalCandidateBuilder()
+        self.boundary_resolver = LocalBoundaryResolver(self.config)
+        self.confidence_router = LocalConfidenceRouter(self.config)
+        self.cross_page_resolver = LocalCrossPageResolver()
+
+    def process_pdf(
         self,
-        reader: PDFReader,
+        pdf_path: str,
+        page_indices: Optional[List[int]] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> LocalRecognitionExperimentResult:
-        """Execute the full VAQL pipeline: Coarse Grid -> Candidates -> Local Refine -> PDF Coords."""
-        start_time = time.time()
-        page_count = reader.page_count
-        total_steps = page_count * 2 + 2
+    ) -> Tuple[List[Question], Dict[int, LocalPageAnalysis]]:
+        """Process a PDF and return formal Question objects along with page analyses.
 
-        run = ExperimentRun(
-            source_pdf_hash=reader.file_hash,
-            source_pdf_name=reader.pdf_path.name,
-            model_provider="local",
-            model_name=self.config.model,
-            mode="virtual_address",
-            grid_rows=self.config.grid_rows,
-            grid_columns=self.config.grid_columns,
-            neighbor_radius=self.config.neighbor_radius,
-            coarse_dpi=self.config.coarse_dpi,
-            local_dpi=self.config.local_dpi,
-            status="RUNNING",
-        )
+        Args:
+            pdf_path: Absolute path to the PDF file.
+            page_indices: Specific 0-indexed pages to process (processes all if None).
+            progress_callback: Optional callback receiving (current_step, total_steps, message).
 
-        def notify(step: int, msg: str) -> None:
-            if progress_callback:
-                progress_callback(step, total_steps, msg)
-
-        coarse_results: List[CoarsePageOutput] = []
-        all_candidates: List[CandidateRect] = []
-        all_segments: List[RefinedQuestionSegment] = []
-        raw_outputs: List[Dict] = []
-
-        coarse_calls = 0
-        local_calls = 0
-        input_image_count = 0
-        input_image_pixels = 0
-
-        try:
-            # 1. Page-level Coarse Localization
-            for p_idx in range(page_count):
-                if cancel_check and cancel_check():
-                    run.status = "CANCELLED"
-                    break
-
-                notify(p_idx + 1, f"正在进行第 {p_idx + 1}/{page_count} 页虚拟地址粗定位...")
-                p_info = reader.get_page_info(p_idx)
-                page_table = VirtualPageTable(
-                    page_index=p_idx,
-                    page_rect=(0.0, 0.0, p_info.width, p_info.height),
-                    rows=self.config.grid_rows,
-                    columns=self.config.grid_columns,
-                )
-
-                # Render coarse page
-                coarse_img_path = Tiler.render_coarse_page(
-                    reader,
-                    page_index=p_idx,
-                    dpi=self.config.coarse_dpi,
-                )
-                input_image_count += 1
-                with Image.open(coarse_img_path) as im:
-                    input_image_pixels += im.width * im.height
-
-                # Optionally add grid overlay if configured
-                target_img_path = coarse_img_path
-                if self.config.send_grid_overlay:
-                    target_img_path = Tiler.add_grid_overlay(coarse_img_path, page_table)
-
-                # Build prompt and call local VLM
-                prompt = self.prompt_builder.build_coarse_prompt(
-                    page_index=p_idx,
-                    grid_rows=self.config.grid_rows,
-                    grid_columns=self.config.grid_columns,
-                    exam_template=getattr(self.config, "exam_template", "kaoyan_math_16"),
-                )
-
-                coarse_calls += 1
-                try:
-                    raw_json = self.provider.analyze_image(target_img_path, prompt)
-                    raw_outputs.append({"stage": "coarse", "page": p_idx, "output": raw_json})
-
-                    # Parse and validate schema
-                    coarse_page = CoarsePageOutput.model_validate(raw_json)
-                    coarse_results.append(coarse_page)
-
-                    # Build candidates for this page
-                    page_candidates = self.candidate_builder.build_candidates_for_page(
-                        page_table=page_table,
-                        coarse_questions=coarse_page.questions,
-                    )
-                    all_candidates.extend(page_candidates)
-
-                except Exception as e:
-                    logger.error(f"Coarse localization failed on page {p_idx}: {e}")
-                    raw_outputs.append({"stage": "coarse", "page": p_idx, "error": str(e)})
-
-            # 2. Local High-DPI Refinement
-            notify(page_count + 1, f"正在对 {len(all_candidates)} 个候选区域执行局部高精定位...")
-            for idx, cand in enumerate(all_candidates):
-                if cancel_check and cancel_check():
-                    run.status = "CANCELLED"
-                    break
-
-                notify(
-                    page_count + 1 + int((idx / max(1, len(all_candidates))) * page_count),
-                    f"正在精修第 {cand.question_number} 题 (P{cand.page_index + 1})...",
-                )
-
-                if not self.config.enable_local_refine:
-                    # If refinement is disabled, use candidate bounding box directly
-                    doc = reader.doc
-                    page = doc[cand.page_index]
-                    p_rect = normalized_to_pdf_rect(page.rect, cand.normalized_rect, padding_ratio=(0.0, 0.0))
-                    seg = RefinedQuestionSegment(
-                        question_number=cand.question_number,
-                        page_index=cand.page_index,
-                        normalized_bbox=cand.normalized_rect,
-                        pdf_bbox=(p_rect.x0, p_rect.y0, p_rect.x1, p_rect.y1),
-                        confidence=0.85,
-                        boundary_complete=True,
-                        source="local_experiment",
-                        candidate_rect=cand,
-                    )
-                    all_segments.append(seg)
-                    continue
-
-                local_calls += 1
-                input_image_count += 1
-                try:
-                    seg = self.local_refiner.refine_candidate(reader, cand)
-                    all_segments.append(seg)
-                except Exception as e:
-                    logger.warning(f"Local refine failed for Q{cand.question_number} on page {cand.page_index}: {e}")
-                    # Fallback to candidate bounding box
-                    doc = reader.doc
-                    page = doc[cand.page_index]
-                    p_rect = normalized_to_pdf_rect(page.rect, cand.normalized_rect, padding_ratio=(0.0, 0.0))
-                    fallback_seg = RefinedQuestionSegment(
-                        question_number=cand.question_number,
-                        page_index=cand.page_index,
-                        normalized_bbox=cand.normalized_rect,
-                        pdf_bbox=(p_rect.x0, p_rect.y0, p_rect.x1, p_rect.y1),
-                        confidence=0.5,
-                        boundary_complete=False,
-                        source="local_experiment_fallback",
-                        candidate_rect=cand,
-                    )
-                    all_segments.append(fallback_seg)
-
-            run.status = "SUCCESS" if run.status != "CANCELLED" else "CANCELLED"
-
-        except Exception as e:
-            logger.exception("VAQL pipeline failed")
-            run.status = "FAILED"
-            run.error_message = str(e)
-
-        elapsed = time.time() - start_time
-        run.end_time = datetime.now(timezone.utc).isoformat()
-
-        # Compute metrics
-        metrics = MetricsCalculator.compute_metrics(
-            detected_segments=all_segments,
-            coarse_calls=coarse_calls,
-            local_calls=local_calls,
-            latency_seconds=elapsed,
-            input_image_count=input_image_count,
-            input_image_pixels=input_image_pixels,
-        )
-
-        result = LocalRecognitionExperimentResult(
-            run=run,
-            coarse_results=coarse_results,
-            candidates=all_candidates,
-            segments=all_segments,
-            metrics=metrics,
-            raw_model_outputs=raw_outputs,
-        )
-
-        # Save result run to data/experiments/
-        self.result_store.save_result(result)
-        notify(total_steps, "实验分析完成！")
-        return result
-
-    def run_direct_baseline_pipeline(
-        self,
-        reader: PDFReader,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> LocalRecognitionExperimentResult:
-        """Execute the Direct Local Baseline pipeline (whole-page direct bbox prediction)."""
-        start_time = time.time()
-        page_count = reader.page_count
-        total_steps = page_count + 1
-
-        run = ExperimentRun(
-            source_pdf_hash=reader.file_hash,
-            source_pdf_name=reader.pdf_path.name,
-            model_provider="local",
-            model_name=self.config.model,
-            mode="direct_baseline",
-            grid_rows=0,
-            grid_columns=0,
-            coarse_dpi=self.config.coarse_dpi,
-            local_dpi=0,
-            status="RUNNING",
-        )
-
-        def notify(step: int, msg: str) -> None:
-            if progress_callback:
-                progress_callback(step, total_steps, msg)
-
-        all_segments: List[RefinedQuestionSegment] = []
-        raw_outputs: List[Dict] = []
-        calls = 0
-        input_image_count = 0
-        input_image_pixels = 0
-
-        baseline_prompt = (
-            "你是一个试卷题目检测器。请直接检测当前页面中的所有试题。\n"
-            "对每道题，输出题号 question_number 和整页归一化边界 bbox: [x1, y1, x2, y2] (范围在 0.0 到 1.0)。\n"
-            "请严格以纯 JSON 输出，格式如下：\n"
-            "{\n"
-            '  "questions": [\n'
-            '    {"question_number": "1", "bbox": [0.05, 0.1, 0.95, 0.3], "confidence": 0.9}\n'
-            "  ]\n"
-            "}"
-        )
-
-        try:
-            for p_idx in range(page_count):
-                if cancel_check and cancel_check():
-                    run.status = "CANCELLED"
-                    break
-
-                notify(p_idx + 1, f"正在进行第 {p_idx + 1}/{page_count} 页直接定位 Baseline 测试...")
-                p_info = reader.get_page_info(p_idx)
-
-                img_path = Tiler.render_coarse_page(
-                    reader,
-                    page_index=p_idx,
-                    dpi=self.config.coarse_dpi,
-                )
-                input_image_count += 1
-                with Image.open(img_path) as im:
-                    input_image_pixels += im.width * im.height
-
-                calls += 1
-                try:
-                    raw_json = self.provider.analyze_image(img_path, baseline_prompt)
-                    raw_outputs.append({"stage": "direct_baseline", "page": p_idx, "output": raw_json})
-
-                    qs = raw_json.get("questions", [])
-                    for q in qs:
-                        q_num = str(q.get("question_number", ""))
-                        bbox = q.get("bbox", [0.0, 0.0, 1.0, 1.0])
-                        conf = float(q.get("confidence", 1.0))
-                        if len(bbox) == 4 and q_num:
-                            nx1, ny1, nx2, ny2 = bbox
-                            p_rect = normalized_to_pdf_rect(
-                                (0.0, 0.0, p_info.width, p_info.height),
-                                (nx1, ny1, nx2, ny2),
-                                padding_ratio=(0.0, 0.0),
-                            )
-                            all_segments.append(
-                                RefinedQuestionSegment(
-                                    question_number=q_num,
-                                    page_index=p_idx,
-                                    normalized_bbox=(round(nx1, 6), round(ny1, 6), round(nx2, 6), round(ny2, 6)),
-                                    pdf_bbox=(round(p_rect.x0, 2), round(p_rect.y0, 2), round(p_rect.x1, 2), round(p_rect.y1, 2)),
-                                    confidence=conf,
-                                    source="direct_local_baseline",
-                                )
-                            )
-                except Exception as e:
-                    logger.error(f"Direct baseline call failed on page {p_idx}: {e}")
-
-            run.status = "SUCCESS" if run.status != "CANCELLED" else "CANCELLED"
-
-        except Exception as e:
-            logger.exception("Direct baseline failed")
-            run.status = "FAILED"
-            run.error_message = str(e)
-
-        elapsed = time.time() - start_time
-        run.end_time = datetime.now(timezone.utc).isoformat()
-
-        metrics = MetricsCalculator.compute_metrics(
-            detected_segments=all_segments,
-            coarse_calls=calls,
-            local_calls=0,
-            latency_seconds=elapsed,
-            input_image_count=input_image_count,
-            input_image_pixels=input_image_pixels,
-        )
-
-        result = LocalRecognitionExperimentResult(
-            run=run,
-            segments=all_segments,
-            metrics=metrics,
-            raw_model_outputs=raw_outputs,
-        )
-
-        self.result_store.save_result(result)
-        notify(total_steps, "Baseline 分析完成！")
-        return result
-
-    @staticmethod
-    def apply_experiment_result_to_questions(
-        result: LocalRecognitionExperimentResult,
-        reader: PDFReader,
-    ) -> List[Question]:
-        """Explicit adapter: Converts experiment segments to formal Question models.
-
-        Does NOT automatically overwrite; must be called explicitly when user confirms.
+        Returns:
+            Tuple of (List of standard Question models, Dict mapping page_index to LocalPageAnalysis).
         """
-        pid = reader.file_hash[:16]
-        questions_map: Dict[str, Question] = {}
+        pdf_path_str = str(pdf_path)
+        doc = fitz.open(pdf_path_str)
+        total_doc_pages = len(doc)
+        target_pages = page_indices if page_indices is not None else list(range(total_doc_pages))
+        total_steps = len(target_pages) * 4 + 2
 
-        # Group segments by question_number
-        for seg in result.segments:
-            q_num = seg.question_number
-            if q_num not in questions_map:
-                questions_map[q_num] = Question(
-                    project_id=pid,
-                    display_number=q_num,
-                    original_display_number=q_num,
-                    question_type=QuestionType.SMALL,
-                    source_pdf_path=str(reader.pdf_path),
-                    source_paper_title=reader.pdf_path.stem,
-                    segments=[],
-                    confidence=seg.confidence,
-                    status=QuestionStatus.DETECTED,
-                    user_modified=False,
+        candidates_by_page: Dict[int, List[LocalQuestionCandidate]] = {}
+        page_analyses: Dict[int, LocalPageAnalysis] = {}
+        step = 0
+
+        # Step 1-4: Page-level analysis
+        for p_idx in target_pages:
+            if p_idx < 0 or p_idx >= total_doc_pages:
+                continue
+
+            page = doc[p_idx]
+            p_w, p_h = page.rect.width, page.rect.height
+
+            # Step 1: Layout & Text Extraction
+            step += 1
+            if progress_callback:
+                progress_callback(step, total_steps, f"正在分析第 {p_idx + 1} 页版面与文本...")
+
+            layout_elements = self.layout_provider.analyze_page(
+                page_image_path=None,
+                page_index=p_idx,
+                pdf_page=page,
+            )
+
+            text_blocks = self.ocr_provider.extract_text_blocks(
+                page_image_path=None,
+                page_index=p_idx,
+                pdf_page=page,
+            )
+
+            # Step 2: Reading Order & Column Detection
+            step += 1
+            if progress_callback:
+                progress_callback(step, total_steps, f"正在分析第 {p_idx + 1} 页分栏与阅读顺序...")
+
+            markers = self.marker_detector.detect_markers(text_blocks, page_index=p_idx)
+            is_two_col, split_x = self.reading_order_detector.detect_two_column(
+                layout_elements or text_blocks,
+                markers=markers,
+            )
+
+            analysis = LocalPageAnalysis(
+                page_index=p_idx,
+                layout_elements=layout_elements,
+                text_blocks=text_blocks,
+                markers=markers,
+                is_two_column=is_two_col,
+                column_split_x=split_x,
+            )
+            page_analyses[p_idx] = analysis
+
+            # Step 3: Candidate Assembly & Boundary Resolution
+            step += 1
+            if progress_callback:
+                progress_callback(step, total_steps, f"正在构建第 {p_idx + 1} 页题目候选区域...")
+
+            candidates = self.candidate_builder.build_candidates_for_page(
+                page_index=p_idx,
+                markers=markers,
+                layout_elements=layout_elements,
+                text_blocks=text_blocks,
+                is_two_column=is_two_col,
+                split_x=split_x,
+            )
+
+            resolved_candidates = self.boundary_resolver.resolve_candidates(
+                candidates,
+                is_two_column=is_two_col,
+                split_x=split_x or 0.50,
+            )
+
+            # Step 4: Confidence Evaluation & Local VLM Review
+            step += 1
+            if progress_callback:
+                progress_callback(step, total_steps, f"正在评估第 {p_idx + 1} 页置信度并进行精修...")
+
+            routed_candidates = self.confidence_router.evaluate_and_route(resolved_candidates)
+
+            # Review uncertain candidates with VLM if applicable
+            if self.config.mode != "fast":
+                for c in routed_candidates:
+                    if c.needs_vlm:
+                        self._verify_candidate_with_vlm(page, c, p_w, p_h)
+
+            candidates_by_page[p_idx] = routed_candidates
+
+        # Step 5: Cross-page resolution
+        step += 1
+        if progress_callback:
+            progress_callback(step, total_steps, "正在进行跨页题目连续性分析...")
+
+        all_candidates = self.cross_page_resolver.resolve_cross_page_candidates(
+            candidates_by_page,
+            page_analyses,
+        )
+
+        # Step 6: Convert to formal Question domain models
+        step += 1
+        if progress_callback:
+            progress_callback(step, total_steps, "正在转换为标准试题模型...")
+
+        questions = self.adapt_to_questions(all_candidates, pdf_path_str, Path(pdf_path_str).name)
+
+        doc.close()
+        return questions, page_analyses
+
+    def _verify_candidate_with_vlm(
+        self,
+        page: Any,
+        candidate: LocalQuestionCandidate,
+        p_w: float,
+        p_h: float,
+    ) -> None:
+        """Render candidate crop and request verification from local VLM."""
+        if not candidate.segments:
+            return
+
+        seg = candidate.segments[0]
+        x0, y0, x1, y1 = seg.bbox
+        # Calculate pixel rect in PDF points
+        rect = fitz.Rect(x0 * p_w, y0 * p_h, x1 * p_w, y1 * p_h)
+        if rect.is_empty or rect.width < 10 or rect.height < 10:
+            return
+
+        try:
+            # Render crop at 150 DPI
+            pix = page.get_pixmap(clip=rect, dpi=150)
+            img_bytes = pix.tobytes("jpeg")
+            crop_b64 = base64.b64encode(img_bytes).decode("ascii")
+
+            verification = self.vlm_provider.verify_question_region(crop_b64, candidate)
+            candidate.vlm_verification = verification
+
+            # If VLM suggests an adjusted bounding box and verification is accepted
+            if verification.accept and verification.bbox is not None:
+                bx0, by0, bx1, by1 = verification.bbox
+                # Validate adjusted bounds are sane
+                if 0.0 <= bx0 < bx1 <= 1.0 and 0.0 <= by0 < by1 <= 1.0:
+                    seg.bbox = (round(bx0, 4), round(by0, 4), round(bx1, 4), round(by1, 4))
+                    candidate.confidence = max(candidate.confidence, verification.confidence)
+                    candidate.reasons.append("VLM adjusted boundary accepted")
+        except Exception as e:
+            logger.warning(f"VLM verification exception for Q{candidate.question_number}: {e}")
+
+    def adapt_to_questions(
+        self,
+        candidates: List[LocalQuestionCandidate],
+        source_pdf_path: Any,
+        paper_title: str,
+    ) -> List[Question]:
+        """Convert LocalQuestionCandidate instances to standard Question domain models."""
+        questions: List[Question] = []
+        pdf_path_str = str(source_pdf_path) if source_pdf_path is not None else None
+
+        # Sort candidates numerically
+        sorted_cand = sorted(
+            candidates,
+            key=lambda c: int(c.question_number) if c.question_number.isdigit() else 999,
+        )
+
+        for sort_order, c in enumerate(sorted_cand):
+            segments: List[QuestionSegment] = []
+            for seg in c.segments:
+                segments.append(
+                    QuestionSegment(
+                        page_index=seg.page_index,
+                        normalized_bbox=seg.bbox,
+                    )
                 )
 
-            q_obj = questions_map[q_num]
-            q_seg = QuestionSegment(
-                question_id=q_obj.id,
-                page_index=seg.page_index,
-                normalized_bbox=seg.normalized_bbox,
-                pdf_bbox=seg.pdf_bbox,
-                user_modified=False,
+            # Determine QuestionType enum
+            q_num = int(c.question_number) if c.question_number.isdigit() else 0
+            if c.question_type == "choice":
+                q_type = QuestionType.CHOICE
+            elif c.question_type == "fill_blank":
+                q_type = QuestionType.FILL_IN
+            elif q_num >= 15 or c.question_type == "solution":
+                q_type = QuestionType.SOLVE
+            else:
+                q_type = QuestionType.SMALL if q_num < 15 else QuestionType.LARGE
+
+            q = Question(
+                display_number=c.question_number,
+                original_display_number=c.question_number,
+                question_type=q_type,
+                source_pdf_path=pdf_path_str,
+                source_paper_title=paper_title,
+                segments=segments,
+                continuation=len(segments) > 1,
+                confidence=c.confidence,
+                review_required=c.needs_vlm or c.confidence < self.config.confidence_threshold,
+                selected=True,
+                sort_order=sort_order + 1,
+                reason_codes=c.reasons,
+                status=QuestionStatus.DETECTED,
             )
-            q_obj.segments.append(q_seg)
+            questions.append(q)
 
-        questions = list(questions_map.values())
-
-        # Sort questions numerically if possible
-        def _sort_key(q: Question) -> Tuple[int, str]:
-            digits = "".join(filter(str.isdigit, q.display_number))
-            return (int(digits) if digits else 9999, q.display_number)
-
-        questions.sort(key=_sort_key)
-        for idx, q in enumerate(questions):
-            q.sort_order = idx
-            q.continuation = len(q.segments) > 1
-
-        logger.info(f"Adapted {len(questions)} experimental questions for project {pid}")
         return questions

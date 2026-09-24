@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QFrame,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from ..storage.paper_template import PaperTemplateStorage
 
@@ -23,6 +23,7 @@ from ..storage.paper_template import PaperTemplateStorage
 class PaperTemplateDialog(QDialog):
     """Dialog allowing users to pick a structure template, enter custom distributions, and save templates."""
 
+    template_applied = Signal(str)
     CUSTOM_OPTION = "【自定义当前试卷题目结构】"
 
     def __init__(
@@ -33,9 +34,12 @@ class PaperTemplateDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("📑 试卷大纲结构配置与提示词模板管理")
-        self.resize(680, 520)
-        self.setModal(True)
+        self.setWindowTitle("📑 试卷结构大纲与提示词模板管理仪表盘")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(680, 500)
+        self.setMinimumSize(500, 360)
+        self.setSizeGripEnabled(True)
 
         self._pdf_name = pdf_name
         self._initial_template_name = current_template_name or PaperTemplateStorage.get_active_template_name()
@@ -268,6 +272,7 @@ class PaperTemplateDialog(QDialog):
         tpl_key = self.combo_template.currentData()
         if tpl_key and tpl_key != self.CUSTOM_OPTION:
             PaperTemplateStorage.set_active_template_name(tpl_key)
+        self.template_applied.emit(self.get_template_name())
         self.accept()
 
     def get_structure_text(self) -> str:

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QFrame,
     QApplication,
+    QDialog,
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import (
@@ -143,8 +144,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("ExamSplit AI —— 试卷 PDF 智能拆题与选题导出系统")
-        self.resize(1340, 880)
-        self.setMinimumSize(980, 660)
+        self.resize(1340, 860)
+        self.setMinimumSize(850, 540)
         self.setAcceptDrops(True)
         self.setStyleSheet(MODERN_APP_STYLESHEET)
 
@@ -155,6 +156,14 @@ class MainWindow(QMainWindow):
         self.analysis_worker: Optional[AnalysisWorker] = None
         self._updating_details = False
 
+        # Independent Dashboard Windows
+        self._settings_window: Optional[SettingsDialog] = None
+        self._local_experiment_window: Optional[Any] = None
+        self._batch_analysis_window: Optional[BatchAnalysisDialog] = None
+        self._basket_window: Optional[QuestionBasketDialog] = None
+        self._template_window: Optional[PaperTemplateDialog] = None
+        self._export_window: Optional[ExportDialog] = None
+
         self._setup_menus()
         self._setup_toolbar()
         self._setup_central_ui()
@@ -162,6 +171,11 @@ class MainWindow(QMainWindow):
 
         if initial_pdf:
             self.load_pdf(initial_pdf)
+
+    def _clear_window_ref(self, attr_name: str) -> None:
+        """Cleanly clear reference to closed dashboard window."""
+        if hasattr(self, attr_name):
+            setattr(self, attr_name, None)
 
     def _setup_menus(self) -> None:
         menubar = self.menuBar()
@@ -218,9 +232,13 @@ class MainWindow(QMainWindow):
 
         # Settings Menu
         settings_menu = menubar.addMenu("设置(&C)")
-        pref_action = QAction("⚙️ API 与服务商偏好设置...", self)
+        pref_action = QAction("⚙️ API 与服务商配置仪表盘...", self)
         pref_action.triggered.connect(self._on_open_settings)
         settings_menu.addAction(pref_action)
+
+        exp_action = QAction("🧪 本地小模型切题实验仪表盘...", self)
+        exp_action.triggered.connect(self._on_open_local_experiment)
+        settings_menu.addAction(exp_action)
 
         settings_menu.addSeparator()
         self.provider_switch_menu = settings_menu.addMenu("🎯 快速切换当前生效服务商")
@@ -351,8 +369,8 @@ class MainWindow(QMainWindow):
         more_menu.addAction("🧺 打开组卷试题篮...", self._on_open_basket)
         more_menu.addAction("🚀 导出选中题目 (A4无损)...", self._on_export_clicked)
         more_menu.addSeparator()
-        more_menu.addAction("⚙️ API 与服务商偏好设置...", self._on_open_settings)
-        more_menu.addAction("🧪 本地识别实验 (VAQL)...", self._on_open_local_experiment)
+        more_menu.addAction("⚙️ API 与模型配置仪表盘...", self._on_open_settings)
+        more_menu.addAction("🧪 本地小模型切题实验仪表盘...", self._on_open_local_experiment)
         self.btn_more_menu.setMenu(more_menu)
         toolbar.addWidget(self.btn_more_menu)
 
@@ -643,51 +661,73 @@ class MainWindow(QMainWindow):
         self.provider_action_group = QActionGroup(self)
         self.provider_action_group.setExclusive(True)
         self.provider_actions: Dict[str, QAction] = {}
-
-        for pid, preset in PROVIDER_PRESETS.items():
-            action = QAction(preset["display_name"], self)
-            action.setCheckable(True)
-            action.setData(pid)
-            action.triggered.connect(lambda checked=False, p=pid: self._on_quick_switch_provider(p))
-            self.provider_action_group.addAction(action)
-            self.provider_switch_menu.addAction(action)
-            self.provider_actions[pid] = action
-
         self._sync_provider_menu()
 
     def _sync_provider_menu(self) -> None:
-        """Synchronize checkmarks in the provider quick-switch menu with KeyStorage."""
-        active_pid = KeyStorage.get_default_provider_id()
-        if hasattr(self, "provider_actions"):
-            for pid, act in self.provider_actions.items():
-                act.setChecked(pid == active_pid)
+        """Synchronize checkmarks in the provider quick-switch menu with KeyStorage profiles."""
+        self.provider_switch_menu.clear()
+        self.provider_actions.clear()
+
+        profiles = KeyStorage.get_all_profiles()
+        active_prof_id = KeyStorage.get_active_profile_id()
+
+        for prof_id, prof in profiles.items():
+            name = prof.get("name", prof_id)
+            model = prof.get("model_name", "")
+            disp = f"{name} ({model})" if model else name
+            action = QAction(disp, self)
+            action.setCheckable(True)
+            action.setChecked(prof_id == active_prof_id)
+            action.setData(prof_id)
+            action.triggered.connect(lambda checked=False, p=prof_id: self._on_quick_switch_profile(p))
+            self.provider_action_group.addAction(action)
+            self.provider_switch_menu.addAction(action)
+            self.provider_actions[prof_id] = action
+
+        self.provider_switch_menu.addSeparator()
+        act_manage = QAction("⚙️ 管理与新建网关配置...", self)
+        act_manage.triggered.connect(self.show_settings)
+        self.provider_switch_menu.addAction(act_manage)
+
+    def _on_quick_switch_profile(self, profile_id: str) -> None:
+        """Quickly switch the active default gateway profile without opening the settings dialog."""
+        KeyStorage.set_active_profile_id(profile_id)
+        self._update_model_indicator()
+        self._sync_provider_menu()
+        prof = KeyStorage.get_profile(profile_id) or {}
+        disp_name = prof.get("name", profile_id)
+        has_key = bool(prof.get("api_key"))
+        key_tip = "（已配置 Key）" if has_key else "（⚠️ 尚未配置 Key，请在设置中输入）"
+        self.statusBar().showMessage(f"当前生效 AI 网关已切换为: {disp_name} {key_tip}", 4000)
 
     def _on_quick_switch_provider(self, provider_id: str) -> None:
-        """Quickly switch the active default provider without opening the settings dialog."""
+        """Backward compatibility provider quick switch."""
         KeyStorage.set_default_provider_id(provider_id)
         self._update_model_indicator()
         self._sync_provider_menu()
-        preset = PROVIDER_PRESETS.get(provider_id, {})
-        disp_name = preset.get("display_name", provider_id)
-        cfg = KeyStorage.get_provider_config(provider_id) or {}
-        has_key = bool(cfg.get("api_key"))
-        key_tip = "（已配置 Key）" if has_key else "（⚠️ 尚未配置 Key，请在设置中输入）"
-        self.statusBar().showMessage(f"当前生效 AI 服务商已切换为: {disp_name} {key_tip}", 4000)
 
     def _update_model_indicator(self) -> None:
         try:
-            pid = KeyStorage.get_default_provider_id()
-            cfg = KeyStorage.get_provider_config(pid) or {}
-            preset = PROVIDER_PRESETS.get(pid, {})
-            display_name = preset.get("display_name", pid)
-            model = cfg.get("model_name") or preset.get("default_model", "")
-            has_key = bool(cfg.get("api_key"))
-            dot = "🟢" if has_key else "🟡"
-            key_status = "已配置Key" if has_key else "未设置Key"
-            self.status_model_label.setText(f"AI网关: {dot} {display_name} ({model}) [{key_status}]")
+            active_prof = KeyStorage.get_active_profile()
+            if active_prof:
+                name = active_prof.get("name", "AI网关")
+                model = active_prof.get("model_name", "")
+                has_key = bool(active_prof.get("api_key"))
+                dot = "🟢" if has_key else "🟡"
+                key_status = "已配置Key" if has_key else "未设置Key"
+                self.status_model_label.setText(f"AI网关: {dot} {name} ({model}) [{key_status}]")
+            else:
+                pid = KeyStorage.get_default_provider_id()
+                cfg = KeyStorage.get_provider_config(pid) or {}
+                preset = PROVIDER_PRESETS.get(pid, {})
+                display_name = preset.get("display_name", pid)
+                model = cfg.get("model_name") or preset.get("default_model", "")
+                has_key = bool(cfg.get("api_key"))
+                dot = "🟢" if has_key else "🟡"
+                key_status = "已配置Key" if has_key else "未设置Key"
+                self.status_model_label.setText(f"AI网关: {dot} {display_name} ({model}) [{key_status}]")
         except Exception:
             self.status_model_label.setText("AI网关: 待配置")
-        self._sync_provider_menu()
 
     def show_home(self) -> None:
         self.stack.setCurrentIndex(0)
@@ -1393,10 +1433,27 @@ class MainWindow(QMainWindow):
             self._update_basket_button_state()
 
     def _on_open_basket(self) -> None:
+        if self._basket_window is not None:
+            self._basket_window.show()
+            self._basket_window.raise_()
+            self._basket_window.activateWindow()
+            return
         dlg = QuestionBasketDialog(parent=self)
-        dlg.exec()
+        dlg.finished.connect(lambda: self._clear_window_ref("_basket_window"))
+        self._basket_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_open_batch_analysis(self, initial_paths: Optional[List[Path]] = None) -> None:
+        if self._batch_analysis_window is not None:
+            if initial_paths:
+                self._batch_analysis_window.add_pdf_paths(initial_paths)
+            self._batch_analysis_window.show()
+            self._batch_analysis_window.raise_()
+            self._batch_analysis_window.activateWindow()
+            return
+
         pid = KeyStorage.get_default_provider_id()
         cfg = KeyStorage.get_provider_config(pid) or {}
         has_key = bool(cfg.get("api_key"))
@@ -1410,7 +1467,11 @@ class MainWindow(QMainWindow):
 
         dlg = BatchAnalysisDialog(provider=provider, initial_paths=initial_paths, parent=self)
         dlg.batch_completed.connect(self._on_batch_analysis_completed)
-        dlg.exec()
+        dlg.finished.connect(lambda: self._clear_window_ref("_batch_analysis_window"))
+        self._batch_analysis_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_batch_analysis_completed(self, results: Dict[str, List[Question]]) -> None:
         if not results:
@@ -1493,13 +1554,22 @@ class MainWindow(QMainWindow):
             PaperTemplateStorage.set_active_template_name(tpl_name)
 
     def _on_open_template_dialog(self) -> None:
-        """Open modal to configure, customize, or save paper structure templates."""
+        """Open independent window to configure, customize, or save paper structure templates."""
+        if self._template_window is not None:
+            self._template_window.show()
+            self._template_window.raise_()
+            self._template_window.activateWindow()
+            return
+
         cur_tpl = self.combo_template.currentData() if hasattr(self, "combo_template") else None
         pdf_name = self.pdf_reader.pdf_path.name if self.pdf_reader else None
         dlg = PaperTemplateDialog(current_template_name=cur_tpl, pdf_name=pdf_name, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            chosen = dlg.get_template_name()
-            self._sync_template_combo(selected_name=chosen)
+        dlg.template_applied.connect(lambda chosen: self._sync_template_combo(selected_name=chosen))
+        dlg.finished.connect(lambda: self._clear_window_ref("_template_window"))
+        self._template_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_select_all(self) -> None:
         self.question_list_widget.blockSignals(True)
@@ -1538,9 +1608,22 @@ class MainWindow(QMainWindow):
         self.tb_export.setEnabled(has_selection)
 
     def _on_open_settings(self) -> None:
+        if self._settings_window is not None:
+            self._settings_window.show()
+            self._settings_window.raise_()
+            self._settings_window.activateWindow()
+            return
+
         dlg = SettingsDialog(self)
         dlg.settings_saved.connect(self._on_settings_saved)
-        dlg.exec()
+        dlg.finished.connect(lambda: self._clear_window_ref("_settings_window"))
+        self._settings_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    show_settings = _on_open_settings
+
 
     def _on_settings_saved(self, provider_id: str) -> None:
         KeyStorage.set_default_provider_id(provider_id)
@@ -1551,7 +1634,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已切换并激活 AI 服务商: {disp_name}", 4000)
 
     def _on_open_local_experiment(self) -> None:
-        """Open the experimental local recognition and virtual address localization dialog."""
+        """Open the experimental local recognition and virtual address localization dashboard."""
+        if self._local_experiment_window is not None:
+            self._local_experiment_window.pdf_reader = self.pdf_reader
+            self._local_experiment_window.formal_questions = self.questions
+            self._local_experiment_window.show()
+            self._local_experiment_window.raise_()
+            self._local_experiment_window.activateWindow()
+            return
+
         from ..experimental.local_recognition.ui import LocalRecognitionExperimentDialog
         dlg = LocalRecognitionExperimentDialog(
             pdf_reader=self.pdf_reader,
@@ -1559,7 +1650,11 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dlg.apply_results_requested.connect(self._on_apply_experiment_questions)
-        dlg.exec()
+        dlg.finished.connect(lambda: self._clear_window_ref("_local_experiment_window"))
+        self._local_experiment_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_apply_experiment_questions(self, questions: List[Question]) -> None:
         """Handle applying experimental questions to the workbench after user confirmation."""
@@ -1582,20 +1677,34 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "未选题目", "请先在左侧列表中勾选至少一道要导出的试题。")
             return
 
+        if self._export_window is not None:
+            self._export_window.selected_questions = selected_qs
+            self._export_window.source_pdf = Path(self.pdf_reader.file_path)
+            self._export_window.show()
+            self._export_window.raise_()
+            self._export_window.activateWindow()
+            return
+
         dlg = ExportDialog(self.pdf_reader.file_path, self.questions, self)
-        dlg.exec()
+        dlg.finished.connect(lambda: self._clear_window_ref("_export_window"))
+        self._export_window = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_about(self) -> None:
         QMessageBox.about(
             self,
             "关于 ExamSplit AI",
             "ExamSplit AI —— 试卷 PDF 智能拆题与选题导出系统\n"
-            "版本: v1.1.0 (正式版)\n\n"
+            "版本: v2.0.0 (大版本发布)\n\n"
+            "• 本地离线轻量级模型流水线（0 接口费用）与云端大模型双引擎驱动\n"
             "• 原生 PDF 矢量与高清图无损裁剪\n"
             "• 多模态 AI 视觉结构定位与题号跨页解析\n"
-            "• 交互式边缘手柄高精微调\n"
-            "• A4 单题一页与紧凑排版双模式无损输出\n"
-            "• 多厂商 AI 网关与一键即时切换",
+            "• 交互式边缘手柄高精微调与全选/反选试题篮\n"
+            "• 全系统仪表盘独立顶层窗口化，互不阻塞，支持随时单独关闭\n"
+            "• 多网关 Profile 配置持久化保存与一键即时切换\n"
+            "• 深度适配 DeepSeek 密集/间隔大题专用提示词与自定义提示词注入",
         )
 
     # Window-wide Drag & Drop
@@ -1617,6 +1726,21 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def closeEvent(self, event) -> None:
+        # Cleanly close all independent dashboard windows
+        for win in [
+            self._settings_window,
+            self._local_experiment_window,
+            self._batch_analysis_window,
+            self._basket_window,
+            self._template_window,
+            self._export_window,
+        ]:
+            if win is not None:
+                try:
+                    win.close()
+                except Exception:
+                    pass
+
         for r in self.opened_documents.values():
             try:
                 r.close()

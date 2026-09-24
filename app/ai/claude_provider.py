@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Tuple
+from typing import Tuple, Optional, Any
 from pathlib import Path
 
 from .base import VisionModelProvider, encode_image_base64
@@ -24,6 +24,8 @@ class ClaudeProvider(VisionModelProvider):
         model_name: str = "claude-3-5-sonnet-20241022",
         timeout: float = 60.0,
         proxy: str = "",
+        custom_prompt: Optional[str] = None,
+        **kwargs: Any,
     ) -> None:
         normalized_url = (base_url or "https://api.anthropic.com/v1").strip().rstrip("/")
         if "api.anthropic.com" in normalized_url and not normalized_url.endswith("/v1"):
@@ -36,6 +38,7 @@ class ClaudeProvider(VisionModelProvider):
             model_name=model_name or "claude-3-5-sonnet-20241022",
             timeout=timeout,
             proxy=proxy,
+            custom_prompt=custom_prompt,
         )
 
     def _get_headers(self) -> dict[str, str]:
@@ -103,7 +106,12 @@ class ClaudeProvider(VisionModelProvider):
             raise ValueError("未配置 Claude API Key")
 
         endpoint = f"{self.base_url}/messages"
-        system_prompt = PromptManager.get_system_prompt("detect_markers", request.context_hints)
+        hints = dict(request.context_hints or {})
+        hints.setdefault("model_name", self.model_name)
+        hints.setdefault("provider_id", self.provider_id)
+        if self.custom_prompt and "custom_prompt" not in hints:
+            hints["custom_prompt"] = self.custom_prompt
+        system_prompt = PromptManager.get_system_prompt("detect_markers", hints)
 
         content_blocks: list[dict] = []
         for img_path in request.image_paths:

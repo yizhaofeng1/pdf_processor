@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QFileDialog,
     QMessageBox,
+    QScrollArea,
+    QFrame,
 )
 from PySide6.QtCore import Qt
 
@@ -39,16 +41,30 @@ class ExportDialog(QDialog):
         self.source_pdf = Path(source_pdf)
         self.selected_questions = [q for q in selected_questions if q.selected]
 
-        self.setWindowTitle("导出选题集 PDF")
-        self.resize(600, 560)
-        self.setModal(True)
+        self.setWindowTitle("📤 选题集 PDF 导出设置仪表盘")
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(600, 520)
+        self.setMinimumSize(480, 360)
+        self.setSizeGripEnabled(True)
 
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(22, 22, 22, 22)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setSpacing(10)
+        outer_layout.setContentsMargins(14, 14, 14, 14)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
+        layout.setSpacing(14)
+        layout.setContentsMargins(4, 4, 8, 4)
 
         # 1. Summary Header Card
         summary_card = QGroupBox("选中题目概览")
@@ -180,8 +196,12 @@ class ExportDialog(QDialog):
 
         layout.addStretch()
 
-        # 5. Dialog Actions
+        scroll_area.setWidget(scroll_widget)
+        outer_layout.addWidget(scroll_area, stretch=1)
+
+        # 5. Dialog Actions (Fixed at bottom)
         btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(6, 6, 6, 0)
         btn_layout.addStretch()
 
         self.btn_cancel = QPushButton("取消")
@@ -193,7 +213,7 @@ class ExportDialog(QDialog):
         self.btn_export.clicked.connect(self._on_start_export)
         btn_layout.addWidget(self.btn_export)
 
-        layout.addLayout(btn_layout)
+        outer_layout.addLayout(btn_layout)
 
     def _on_mode_toggled(self) -> None:
         self.adaptive_options_widget.setVisible(self.radio_adaptive.isChecked())

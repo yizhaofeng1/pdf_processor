@@ -57,6 +57,23 @@ hiddenimports = [
     'pydantic_core',
     'dotenv',
     'sqlite3',
+    'app.experimental',
+    'app.experimental.local_ai',
+    'app.experimental.local_ai.config',
+    'app.experimental.local_ai.types',
+    'app.experimental.local_ai.local_vlm',
+    'app.experimental.local_ai.ocr_provider',
+    'app.experimental.local_ai.layout_provider',
+    'app.experimental.local_detection',
+    'app.experimental.local_detection.reading_order',
+    'app.experimental.local_detection.marker_detector',
+    'app.experimental.local_detection.candidate_builder',
+    'app.experimental.local_detection.boundary_resolver',
+    'app.experimental.local_detection.confidence_router',
+    'app.experimental.local_detection.cross_page_resolver',
+    'app.experimental.local_recognition',
+    'app.experimental.local_recognition.service',
+    'app.experimental.local_recognition.ui',
 ]
 
 # Platform-specific icon selection
@@ -65,16 +82,24 @@ if sys.platform.startswith('win'):
 else:
     app_icon = str(BASE_DIR / 'resources' / 'icon.png')
 
+# Collect essential binary runtime DLLs on Windows (e.g. Conda Library/bin: libexpat, sqlite3, etc.)
+binaries = []
+if sys.platform.startswith('win'):
+    conda_lib_bin = Path(sys.prefix) / 'Library' / 'bin'
+    if conda_lib_bin.exists():
+        for dll in conda_lib_bin.glob('*.dll'):
+            binaries.append((str(dll), '.'))
+
 a = Analysis(
     ['run_app.py'],
     pathex=[str(BASE_DIR)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'scipy', 'numpy', 'IPython'],
+    excludes=['tkinter', 'matplotlib', 'scipy', 'numpy', 'IPython', 'PyQt5', 'PyQt6'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
